@@ -225,9 +225,18 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
             let engine_version = handle
                 .engine_version()
                 .unwrap_or_else(|_| "unknown".to_string());
+            let provider_version = handle
+                .describe()
+                .ok()
+                .and_then(|d| {
+                    d.pointer("/provider/version")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "unknown".to_string());
             let key = cache_key(
                 &node.task,
-                &provider_name,
+                &format!("{provider_name}@{provider_version}"),
                 &engine_version,
                 &resolved.input_hashes,
                 &resolved.params,
@@ -599,7 +608,13 @@ fn build_job(
     provider: ProviderHandle,
     attempt: u32,
 ) -> Result<Job> {
-    let task_run_id = TaskRunId::new();
+    // Reuse the task_run row when re-dispatching after a retry/resume:
+    // artifact links already reference it (PK changes would violate FK).
+    let task_run_id = ctx
+        .db
+        .get_task_run(ctx.run.id.as_str(), &node.id)
+        .map(|r| r.id)
+        .unwrap_or_else(|_| TaskRunId::new());
     let workdir = ctx
         .project
         .runs_dir()
@@ -834,7 +849,13 @@ fn apply_cache_hit(
     resolved: &ResolvedNode,
 ) -> Result<()> {
     let outputs = ctx.db.outputs_of(cached_task_run)?;
-    let tr_id = TaskRunId::new();
+    // Reuse the per-(run,node) row id if it exists: artifact links from a
+    // previous attempt reference it (changing the PK would violate FK).
+    let tr_id = ctx
+        .db
+        .get_task_run(ctx.run.id.as_str(), &node.id)
+        .map(|r| r.id)
+        .unwrap_or_else(|_| TaskRunId::new());
     let key = states[&node.id].cache_key.clone();
     // the task_run row must exist before input/output links (FK constraint)
     let (task_name, task_version) = split_task_ref(&node.task);

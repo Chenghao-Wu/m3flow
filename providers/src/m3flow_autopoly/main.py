@@ -21,7 +21,7 @@ import yaml
 from m3flow_provider import (Provider, ProviderFailure, artifact, read_request,
                              verdict)
 
-PROVIDER_VERSION = "0.3.0"
+PROVIDER_VERSION = "0.3.1"
 
 
 def _engine():
@@ -336,15 +336,29 @@ def prepare_simulation_system(req):
         if substrate is not None and strategy == "mc_random":
             strategy = "on_substrate"
         # Builder slabs are constructed to match the box, so the lateral
-        # dims must be explicit. Default: cover the film's aim footprint,
-        # at least 30 A laterally.
+        # dims must be explicit — and so must lz: AutoPoly's auto film
+        # height is volumetric only and lands far below a chain diameter.
+        # lz = slab thickness + gap + film height + vacuum.
         if substrate is not None and box_size is None and box_dims is None:
             film_mass = _spec_total_mass(meta.get("components") or [])
             rho = 0.85 * (target_density or 1.0)
             lat = 30.0
+            film_vol = None
             if film_mass:
-                lat = max(30.0, (film_mass / 6.02214076e23 / rho * 1e24) ** (1.0 / 3.0))
-            box_dims = (lat, lat, None)
+                film_vol = film_mass / 6.02214076e23 / rho * 1e24
+                lat = max(30.0, film_vol ** (1.0 / 3.0))
+            thickness, gap_v = 10.0, 3.0
+            for comp in meta.get("components") or []:
+                if comp["type"] == "substrate":
+                    thickness = float((comp.get("options") or {}).get("thickness", 10.0))
+            gap = env.get("gap")
+            if isinstance(gap, dict):
+                gap_v = gap["value"]
+            film_t = 20.0
+            if film_vol:
+                film_t = max(20.0, film_vol / (lat * lat))
+            vacuum = 15.0
+            box_dims = (lat, lat, thickness + gap_v + film_t + vacuum)
 
     import AutoPoly
     system = AutoPoly.System(out="autopoly")
@@ -401,8 +415,13 @@ def prepare_simulation_system(req):
                     last_err = e
         if packer is None:
             # Polymers (or as a last resort): grow the box until placement
-            # fits; chain conformers need 3x their placement radius.
-            for attempt in range(4):
+            # fits; chain conformers need 3x their placement radius. On a
+            # substrate the lateral dims are the constraint: N chains of
+            # radius r need a ceil(sqrt(N)) x 2r lattice.
+            n_film = sum(int(c.get("number_of_chains") or c.get("count") or 1)
+                         for c in (meta.get("components") or [])
+                         if c.get("type") != "substrate")
+            for attempt in range(5):
                 try:
                     packer, result = pack_once(0.06, box=trial_box)
                     break
@@ -410,8 +429,16 @@ def prepare_simulation_system(req):
                     last_err = e
                     m = re.search(r"radius ([0-9.]+) A", str(e))
                     radius_hint = float(m.group(1)) * 3.0 if m else None
-                    base = trial_box if trial_box else (radius_hint or 30.0)
-                    trial_box = max(base * 1.35, radius_hint or 0.0)
+                    if substrate is not None and box_dims is not None:
+                        import math
+                        side = math.ceil(math.sqrt(max(1, n_film)))
+                        lat = max(box_dims[0] * 1.3,
+                                  side * 2.0 * (radius_hint or box_dims[0]))
+                        box_dims = (lat, lat, box_dims[2])
+                        trial_box = None
+                    else:
+                        base = trial_box if trial_box else (radius_hint or 30.0)
+                        trial_box = max(base * 1.35, radius_hint or 0.0)
         if packer is None and strategy != "grid" and substrate is None and not has_polymers:
             used_strategy = "grid"
             try:
@@ -645,8 +672,9 @@ def _prepare_cg(req, inp, meta, params):
             raise ProviderFailure(
                 "input_invalid", "input_error",
                 f"CG system: component '{comp['id']}' is not bead_spring")
-        bs = rep.get("beads") or {}
-        for bname, bdef in bs.items():
+        bs = comp.get("bead_spring") or {}
+        for bdef in bs.get("bead_types") or []:
+            bname = bdef["name"]
             if bname not in bead_types:
                 bead_types[bname] = AutoPoly.BeadType(
                     bname,

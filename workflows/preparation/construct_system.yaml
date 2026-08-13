@@ -26,6 +26,10 @@ parameters:
     type: density
     description: Override the SystemSpec environment target density.
   strategy: {type: enum, values: [grid, mc_random], default: mc_random}
+  use_mc_chain_growth:
+    type: boolean
+    default: false
+    description: "Grow chains coiled (smaller bounding spheres); helps film/interface packing."
   seed: {type: integer, default: 12345}
 
 steps:
@@ -35,6 +39,7 @@ steps:
       specification: "${inputs.specification}"
     parameters:
       seed: "${params.seed}"
+      use_mc_chain_growth: "${params.use_mc_chain_growth}"
 
   parameterize:
     task: parameterize_system

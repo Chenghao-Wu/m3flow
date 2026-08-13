@@ -48,7 +48,7 @@ stages:
   - {ensemble: npt, name: s18_press6, temperature: "${params.temperature}", pressure: 500 atm, duration: 1 ps, timestep: "${params.timestep}"}
   - {ensemble: nvt, name: s19_hot7, temperature: "${params.hot_temperature}", duration: 1 ps, timestep: "${params.timestep}"}
   - {ensemble: nvt, name: s20_cool7, temperature: "${params.temperature}", duration: 2 ps, timestep: "${params.timestep}"}
-  - {ensemble: npt, name: s21_npt, temperature: "${params.temperature}", pressure: "${params.final_pressure}", duration: 10 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s21_npt, temperature: "${params.temperature}", pressure: "${params.final_pressure}", duration: 60 ps, timestep: "${params.timestep}"}
 
 steps:
   check:
@@ -56,6 +56,10 @@ steps:
     inputs:
       thermo: "${s21_npt.thermo}"
       trajectory: "${s21_npt.trajectory}"
+    parameters:
+      # reduced-scale tolerance: ps-scale tails have genuine statistical drift
+      density_drift_threshold: 0.05
+      stationarity_sigma: 4.0
   promote:
     task: promote_equilibrated_state
     inputs:

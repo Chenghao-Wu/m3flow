@@ -32,6 +32,7 @@ steps:
       specification: "${inputs.specification}"
     parameters:
       seed: "${params.seed}"
+      use_mc_chain_growth: true
 
   relax:
     workflow: interface_relaxation

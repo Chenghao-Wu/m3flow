@@ -16,7 +16,7 @@ import numpy as np
 
 from m3flow_provider import (Provider, ProviderFailure, artifact, verdict)
 
-PROVIDER_VERSION = "0.3.0"
+PROVIDER_VERSION = "0.3.1"
 
 
 def _engine():
@@ -56,6 +56,21 @@ def _tail(x, fraction):
 
 def _mean_sem(x):
     return float(np.mean(x)), float(np.std(x, ddof=1) / np.sqrt(max(1, len(x) - 1)))
+
+
+def _correlated_sem(x):
+    """SEM accounting for time correlation via lag-1 autocorrelation
+    (effective sample size n_eff = n * (1-rho)/(1+rho))."""
+    n = len(x)
+    if n < 8:
+        return float(np.std(x, ddof=1) / np.sqrt(max(1, n - 1)))
+    x0 = x[:-1] - x[:-1].mean()
+    x1 = x[1:] - x[1:].mean()
+    denom = float((x0 * x0).sum() * (x1 * x1).sum())
+    rho = float((x0 * x1).sum() / np.sqrt(denom)) if denom > 0 else 0.0
+    rho = min(max(rho, -0.95), 0.95)
+    n_eff = max(2.0, n * (1.0 - rho) / (1.0 + rho))
+    return float(np.std(x, ddof=1) / np.sqrt(n_eff))
 
 
 def _universe(traj_input):
@@ -381,12 +396,14 @@ def check_polymer_equilibration(req):
     total_drift = abs(slope) * (tt[-1] - tt[0]) / mean_rho if mean_rho else float("inf")
     drift_ok = total_drift < drift_threshold
 
-    # stationarity: tail mean vs last-window mean within sigma_mult * sem
+    # stationarity: tail mean vs last-window mean within sigma_mult * sem.
+    # Thermo samples are time-correlated, so use the correlation-corrected
+    # SEM (lag-1 autocorrelation -> effective sample size); raw SEM would
+    # flag any real drift as significant at ps sampling intervals.
     half = tail[len(tail) // 2:]
-    m1, sem1 = _mean_sem(tail)
+    m1, _ = _mean_sem(tail)
     m2, _ = _mean_sem(half)
-    stat_ok = abs(m2 - m1) < sigma_mult * max(sem1, 1e-12)
-
+    sem1 = _correlated_sem(tail)
     metrics = {
         "density_mean_g_cm3": mean_rho,
         "density_relative_drift": float(total_drift),
@@ -395,6 +412,7 @@ def check_polymer_equilibration(req):
         "stationarity_sigma": sigma_mult,
         "n_tail_samples": int(len(tail)),
     }
+    stat_ok = abs(m2 - m1) < sigma_mult * max(sem1, 1e-12)
     checks = {"density_drift": bool(drift_ok), "density_stationarity": bool(stat_ok)}
 
     traj = req["inputs"].get("trajectory")

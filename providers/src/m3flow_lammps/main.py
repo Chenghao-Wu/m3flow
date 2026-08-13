@@ -25,7 +25,7 @@ from pathlib import Path
 
 from m3flow_provider import (Provider, ProviderFailure, artifact, verdict)
 
-PROVIDER_VERSION = "0.3.0"
+PROVIDER_VERSION = "0.3.1"
 ATM_PER_BAR = 0.986923
 FS_PER_TAU = 1000.0  # lj-time convention for CG systems
 

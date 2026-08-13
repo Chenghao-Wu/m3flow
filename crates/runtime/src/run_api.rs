@@ -112,7 +112,32 @@ pub fn run_workflow(
         workflow_inputs,
         run,
     };
-    scheduler::execute(ctx)
+    finalize_on_error(scheduler::execute(ctx), project)
+}
+
+/// If the scheduler dies with a hard error, the run row must not stay
+/// RUNNING — mark it FAILED before propagating.
+fn finalize_on_error(
+    result: Result<WorkflowRunRecord>,
+    project: &Project,
+) -> Result<WorkflowRunRecord> {
+    match result {
+        Ok(rec) => Ok(rec),
+        Err(e) => {
+            if let Ok(db) = open_db(project) {
+                // best-effort: mark non-terminal task rows CANCELLED, run FAILED
+                let _ = db.conn().execute(
+                    "UPDATE task_run SET status='CANCELLED' WHERE workflow_run_id IN (SELECT id FROM workflow_run WHERE status='RUNNING') AND status IN ('RUNNING','PENDING','READY')",
+                    [],
+                );
+                let _ = db.conn().execute(
+                    "UPDATE workflow_run SET status='FAILED', ended_at=?1, error_json=?2 WHERE status='RUNNING'",
+                    rusqlite::params![now_rfc3339(), e.to_string()],
+                );
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Resume an interrupted/failed run: successful nodes are kept, everything
@@ -163,11 +188,10 @@ fn resume_impl(
     let db = open_db(project)?;
     let store = open_store(project)?;
     let rec = db.get_workflow_run(run_id)?;
+    // A RUNNING row with no live process means a crashed run (the CLI is
+    // single-writer per project); resume is the recovery path.
     if rec.status == RunStatus::Running {
-        return Err(M3FlowError::workflow(
-            format!("run '{run_id}' is still marked RUNNING; cancel it first"),
-            None,
-        ));
+        eprintln!("warning: run '{run_id}' was marked RUNNING (crashed run); resuming");
     }
     let compiled = recompile(&registry, &rec)?;
 
@@ -224,7 +248,7 @@ fn resume_impl(
         workflow_inputs,
         run,
     };
-    scheduler::execute(ctx)
+    finalize_on_error(scheduler::execute(ctx), project)
 }
 
 /// Signal cancellation: the scheduler polls for this flag file.
