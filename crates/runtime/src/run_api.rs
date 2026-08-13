@@ -597,6 +597,37 @@ fn lineage_of(db: &Db, artifact_id: &str, depth: usize) -> Result<serde_json::Va
     Ok(out)
 }
 
+/// Lineage for every output of a task run (TUI provenance pane).
+pub fn lineage_json_for_task(project: &Project, task_run_id: &str) -> Result<serde_json::Value> {
+    let db = open_db(project)?;
+    let tr = db.task_run_by_id(task_run_id)?;
+    let mut outputs = Vec::new();
+    for (oname, aid) in db.outputs_of(task_run_id)? {
+        outputs.push(serde_json::json!({
+            "output": oname,
+            "artifact": lineage_of(&db, &aid, 0)?,
+        }));
+    }
+    let mut inputs = Vec::new();
+    for (iname, aid) in db.inputs_of(task_run_id)? {
+        let a = db.get_artifact(&aid)?;
+        inputs.push(serde_json::json!({
+            "input": iname,
+            "artifact": {"id": aid, "type": a.artifact_type},
+        }));
+    }
+    Ok(serde_json::json!({
+        "task_run": {
+            "id": tr.id.as_str(),
+            "node_id": tr.node_id,
+            "task": format!("{}@{}", tr.task_name, tr.task_version),
+            "status": tr.status.as_str(),
+        },
+        "inputs": inputs,
+        "outputs": outputs,
+    }))
+}
+
 /// Which inputs of `task_ref` could accept this artifact?
 pub fn compatible_json(
     project: &Project,
