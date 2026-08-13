@@ -196,7 +196,9 @@ def _interaction_block(ctx):
     lines = [
         f"group m3_ga {ga}",
         f"group m3_gb {gb}",
-        "compute m3_eint all group/group m3_ga m3_gb",
+        # compute ID g1 group/group g2 (pairwise only; kspace excluded,
+        # the standard convention for interfacial E_int)
+        "compute m3_eint m3_ga group/group m3_gb",
     ]
     return lines, ["c_m3_eint"]
 

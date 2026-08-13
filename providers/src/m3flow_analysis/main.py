@@ -16,7 +16,7 @@ import numpy as np
 
 from m3flow_provider import (Provider, ProviderFailure, artifact, verdict)
 
-PROVIDER_VERSION = "0.3.1"
+PROVIDER_VERSION = "0.3.2"
 
 
 def _engine():
@@ -135,6 +135,16 @@ def compute_rdf(req):
     types_b = p.get("types_b")
 
     import freud
+    # Small boxes: clamp r_max to what the box supports (recorded, not silent)
+    first_dims = u.trajectory[0].dimensions
+    lmin = min(float(x) for x in first_dims[:3])
+    note = None
+    if rmax > lmin / 2.2:
+        rmax_eff = lmin / 2.2
+        note = (f"r_max clamped {rmax:.2f} -> {rmax_eff:.2f} A "
+                f"(box edge {lmin:.1f} A)")
+        rmax = rmax_eff
+
     rdf = freud.density.RDF(bins=nbins, r_max=rmax)
     sel_a = _type_selection(u, types_a)
     sel_b = _type_selection(u, types_b)
@@ -155,6 +165,8 @@ def compute_rdf(req):
            "g_r": [float(x) for x in np.nan_to_num(rdf.rdf)],
            "rmax": float(rmax), "nbins": nbins,
            "types_a": types_a, "types_b": types_b,
+           "n_frames_used": n_used,
+           "note": note,
            "unit": "angstrom" if req["inputs"]["trajectory"].get("metadata", {}).get("units") != "lj" else "sigma"}
     with open("rdf.csv", "w") as f:
         f.write("r,g_r\n")
