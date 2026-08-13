@@ -1,0 +1,21 @@
+schema: system/v1
+name: peo_small
+description: Reduced-scale PEO melt (DOP 8, 6 chains) for reference runs.
+components:
+  - id: peo
+    type: polymer
+    representation:
+      type: psmiles
+      first: "CCO[*]"
+      middle: "[*]CCO[*]"
+      last: "[*]CCO"
+    degree_of_polymerization: 8
+    number_of_chains: 6
+    topology: linear
+    tacticity: atactic
+environment:
+  type: bulk
+  target_density: {value: 1.1, unit: g/cm3}
+resolution:
+  type: atomistic
+  force_field: oplsaa

@@ -256,6 +256,7 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
             )?;
             {
                 let st = states.get_mut(&node.id).unwrap();
+                st.status = TaskStatus::Running;
                 st.attempts = attempt;
                 st.task_run = Some(job.task_run_id.clone());
             }
@@ -834,6 +835,28 @@ fn apply_cache_hit(
 ) -> Result<()> {
     let outputs = ctx.db.outputs_of(cached_task_run)?;
     let tr_id = TaskRunId::new();
+    let key = states[&node.id].cache_key.clone();
+    // the task_run row must exist before input/output links (FK constraint)
+    let (task_name, task_version) = split_task_ref(&node.task);
+    let rec = TaskRunRecord {
+        id: tr_id.clone(),
+        workflow_run_id: ctx.run.id.clone(),
+        node_id: node.id.clone(),
+        task_name,
+        task_version,
+        provider: node.provider.clone(),
+        status: TaskStatus::Cached,
+        cache_key: key,
+        attempts: 0,
+        created_at: now_rfc3339(),
+        started_at: None,
+        ended_at: Some(now_rfc3339()),
+        params: serde_json::Value::Object(resolved.params.clone()),
+        error: None,
+        validation: None,
+        engine: None,
+    };
+    ctx.db.upsert_task_run(&rec)?;
     let mut map = BTreeMap::new();
     for (oname, art_id) in outputs {
         if let Some(parsed) = ArtifactId::parse(&art_id) {
@@ -846,33 +869,12 @@ fn apply_cache_hit(
             ctx.db.link_input(tr_id.as_str(), iname, id.as_str())?;
         }
     }
-    let key = states[&node.id].cache_key.clone();
     {
         let st = states.get_mut(&node.id).unwrap();
         st.status = TaskStatus::Cached;
-        st.task_run = Some(tr_id.clone());
+        st.task_run = Some(tr_id);
         st.outputs = map;
     }
-    let (task_name, task_version) = split_task_ref(&node.task);
-    let rec = TaskRunRecord {
-        id: tr_id,
-        workflow_run_id: ctx.run.id.clone(),
-        node_id: node.id.clone(),
-        task_name,
-        task_version,
-        provider: node.provider.clone(),
-        status: TaskStatus::Cached,
-        cache_key: key,
-        attempts: 0,
-        created_at: now_rfc3339(),
-        started_at: None,
-        ended_at: None,
-        params: serde_json::Value::Object(resolved.params.clone()),
-        error: None,
-        validation: None,
-        engine: None,
-    };
-    ctx.db.upsert_task_run(&rec)?;
     Ok(())
 }
 

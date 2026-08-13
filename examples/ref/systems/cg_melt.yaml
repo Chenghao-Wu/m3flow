@@ -1,0 +1,18 @@
+schema: system/v1
+name: cg_melt
+description: Kremer-Grest bead-spring melt (10 beads x 8 chains).
+components:
+  - id: kg
+    type: polymer
+    representation:
+      type: bead_spring
+      beads:
+        A: {mass: 1.0, epsilon: 1.0, sigma: 1.0}
+    degree_of_polymerization: 10
+    number_of_chains: 8
+    topology: linear
+environment:
+  type: bulk
+resolution:
+  type: coarse_grained
+  model: kremer_grest

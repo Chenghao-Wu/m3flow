@@ -1,0 +1,14 @@
+schema: system/v1
+name: ethanol_bulk
+description: Small ethanol bulk for reduced-scale reference runs.
+components:
+  - id: ethanol
+    type: molecule
+    representation: {type: smiles, value: "CCO"}
+    count: 47
+environment:
+  type: bulk
+  target_density: {value: 0.789, unit: g/cm3}
+resolution:
+  type: atomistic
+  force_field: oplsaa
