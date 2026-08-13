@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "m3flow-providers"
+version = "0.3.0"
+description = "M3Flow provider processes: AutoPoly, LAMMPS, analysis (m3flow-provider/1 protocol)"
+requires-python = ">=3.10"
+dependencies = ["PyYAML", "numpy"]
+
+[project.scripts]
+m3flow-autopoly = "m3flow_autopoly.main:cli"
+m3flow-lammps = "m3flow_lammps.main:cli"
+m3flow-analysis = "m3flow_analysis.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
