@@ -1,0 +1,105 @@
+schema: workflow/v1
+
+name: equilibrate_polymer
+version: 1.0.0
+
+description: >
+  Adaptive equilibration (plan §21): run the base protocol, check, and only
+  if the state is NOT equilibrated extend with an additional NPT block and
+  check again. Runtime control flow via conditions, not AI. The workflow
+  output `equilibrated_state` is present when the base protocol sufficed,
+  `equilibrated_state_extended` when the extension was needed; if neither is
+  present, the system did not equilibrate and the run is FAILED.
+
+kind: scientific_protocol
+domain: [polymer, atomistic, bulk]
+purpose: [equilibration, adaptive]
+applicability:
+  resolution: atomistic
+  systems: [polymer_melt]
+references:
+  - Extends polymer_21step_equilibration@1.0.0 with an adaptive extension.
+assumptions:
+  - One extension block is enough for moderately entangled melts; increase
+    extension_duration or re-run otherwise.
+
+inputs:
+  system:
+    type: SimulationSystem
+    required: true
+
+parameters:
+  temperature: {type: temperature, default: 300 K}
+  pressure: {type: pressure, default: 1 bar}
+  anneal_temperature: {type: temperature, default: 600 K}
+  compression_pressure: {type: pressure, default: 1000 bar}
+  base_duration: {type: time, default: 50 ps}
+  extension_duration: {type: time, default: 200 ps}
+  timestep: {type: time, default: 1 fs}
+  seed: {type: integer, default: 12345}
+
+stages:
+  - {ensemble: minimize, name: s01_minimize, duration: 5 ps, timestep: 0.5 fs}
+  - {ensemble: nvt, name: s02_nvt,
+     temperature: "${params.temperature}", duration: "${params.base_duration}",
+     timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s03_compress,
+     temperature: "${params.temperature}", pressure: "${params.compression_pressure}",
+     duration: "${params.base_duration}", timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s04_anneal_up,
+     temperature_start: "${params.temperature}", temperature_end: "${params.anneal_temperature}",
+     duration: "${params.base_duration}", timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s05_anneal_down,
+     temperature_start: "${params.anneal_temperature}", temperature_end: "${params.temperature}",
+     duration: "${params.base_duration}", timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s06_npt,
+     temperature: "${params.temperature}", pressure: "${params.pressure}",
+     duration: "${params.base_duration}", timestep: "${params.timestep}"}
+
+steps:
+  check_base:
+    task: check_polymer_equilibration
+    inputs:
+      thermo: "${s06_npt.thermo}"
+      trajectory: "${s06_npt.trajectory}"
+
+  promote_base:
+    task: promote_equilibrated_state
+    condition: "${check_base.report.equilibrated}"
+    inputs:
+      state: "${s06_npt.state}"
+      report: "${check_base.report}"
+
+  extend_npt:
+    task: run_npt
+    condition: "not ${check_base.report.equilibrated}"
+    inputs:
+      state: "${s06_npt.state}"
+    parameters:
+      temperature: "${params.temperature}"
+      pressure: "${params.pressure}"
+      duration: "${params.extension_duration}"
+      timestep: "${params.timestep}"
+
+  check_extended:
+    task: check_polymer_equilibration
+    condition: "not ${check_base.report.equilibrated}"
+    inputs:
+      thermo: "${extend_npt.thermo}"
+      trajectory: "${extend_npt.trajectory}"
+
+  promote_extended:
+    task: promote_equilibrated_state
+    condition: "not ${check_base.report.equilibrated}"
+    inputs:
+      state: "${extend_npt.state}"
+      report: "${check_extended.report}"
+
+outputs:
+  equilibrated_state:
+    value: "${promote_base.state}"
+    description: Present when the base protocol sufficed.
+  equilibrated_state_extended:
+    value: "${promote_extended.state}"
+    description: Present when the extension block was needed.
+  base_report: {value: "${check_base.report}"}

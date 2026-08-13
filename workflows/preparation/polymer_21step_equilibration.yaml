@@ -1,0 +1,150 @@
+schema: workflow/v1
+
+name: polymer_21step_equilibration
+version: 1.0.0
+
+description: >
+  Larsen's 21-step compression/decompression equilibration for polymer melts,
+  as implemented in RadonPy (radonpy/sim/preset/eq.py, eq21step). Seven rows
+  of [NVT hot / NVT cool / NPT compress], with the NPT pressure following the
+  ratio schedule 0.02 / 0.60 / 1.00 / 0.50 / 0.10 / 0.01 x max_pressure and a
+  final long NPT at the target pressure. An energy minimization precedes the
+  21 stages (RadonPy does the same in its packing stage). Completing the
+  stages is NOT proof of equilibration (plan §20): the terminal
+  check_polymer_equilibration gates promotion to EquilibratedState and the
+  run FAILS when the state is not scientifically equilibrated.
+  The stage schedule is immutable by design (plan §18): fork a new version
+  to change it.
+
+kind: scientific_protocol
+domain: [polymer, atomistic, bulk]
+purpose: [equilibration]
+applicability:
+  resolution: atomistic
+  systems: [polymer_melt, polymer_solution, thermoset]
+references:
+  - "Larsen 21-step compression/decompression schedule, as implemented in
+    RadonPy: Hayashi et al., npj Comput. Mater. 8, 222 (2022),
+    radonpy/sim/preset/eq.py (eq21step, press_ratio 0.02..0.01 x 50000 atm)."
+assumptions:
+  - Non-reactive atomistic force field (oplsaa-class).
+  - Input is a freshly packed SimulationSystem (prepare_simulation_system).
+  - "High-pressure NPT at 300 K is intentional: compression followed by
+    decompression removes free-volume memory of the packing."
+
+inputs:
+  system:
+    type: SimulationSystem
+    required: true
+    description: Packed atomistic system (from prepare_simulation_system).
+
+parameters:
+  temperature:
+    type: temperature
+    default: 300 K
+    description: "Cool/target temperature (Larsen: 300 K)."
+  hot_temperature:
+    type: temperature
+    default: 600 K
+    description: "Hot NVT temperature (Larsen: 600 K)."
+  final_pressure:
+    type: pressure
+    default: 1 atm
+    description: Target pressure of the closing NPT stage.
+  final_npt_duration:
+    type: time
+    default: 800 ps
+    description: Length of the closing NPT hold (the sampling tail).
+  timestep:
+    type: time
+    default: 1 fs
+  seed:
+    type: integer
+    default: 12345
+
+stages:
+  - {ensemble: minimize, name: s00_minimize,
+     duration: 5 ps, timestep: 0.5 fs}
+
+  # row 1 — 0.02 x 50000 atm = 1000 atm
+  - {ensemble: nvt, name: s01_hot1, temperature: "${params.hot_temperature}",
+     duration: 50 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s02_cool1, temperature: "${params.temperature}",
+     duration: 50 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s03_press1, temperature: "${params.temperature}",
+     pressure: 1000 atm, duration: 50 ps, timestep: "${params.timestep}"}
+
+  # row 2 — 0.60 x 50000 atm = 30000 atm
+  - {ensemble: nvt, name: s04_hot2, temperature: "${params.hot_temperature}",
+     duration: 50 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s05_cool2, temperature: "${params.temperature}",
+     duration: 100 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s06_press2, temperature: "${params.temperature}",
+     pressure: 30000 atm, duration: 50 ps, timestep: "${params.timestep}"}
+
+  # row 3 — 1.00 x 50000 atm = 50000 atm (maximum compression)
+  - {ensemble: nvt, name: s07_hot3, temperature: "${params.hot_temperature}",
+     duration: 50 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s08_cool3, temperature: "${params.temperature}",
+     duration: 100 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s09_press3, temperature: "${params.temperature}",
+     pressure: 50000 atm, duration: 50 ps, timestep: "${params.timestep}"}
+
+  # row 4 — 0.50 x 50000 atm = 25000 atm (decompression begins)
+  - {ensemble: nvt, name: s10_hot4, temperature: "${params.hot_temperature}",
+     duration: 50 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s11_cool4, temperature: "${params.temperature}",
+     duration: 100 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s12_press4, temperature: "${params.temperature}",
+     pressure: 25000 atm, duration: 5 ps, timestep: "${params.timestep}"}
+
+  # row 5 — 0.10 x 50000 atm = 5000 atm
+  - {ensemble: nvt, name: s13_hot5, temperature: "${params.hot_temperature}",
+     duration: 5 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s14_cool5, temperature: "${params.temperature}",
+     duration: 10 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s15_press5, temperature: "${params.temperature}",
+     pressure: 5000 atm, duration: 5 ps, timestep: "${params.timestep}"}
+
+  # row 6 — 0.01 x 50000 atm = 500 atm
+  - {ensemble: nvt, name: s16_hot6, temperature: "${params.hot_temperature}",
+     duration: 5 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s17_cool6, temperature: "${params.temperature}",
+     duration: 10 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s18_press6, temperature: "${params.temperature}",
+     pressure: 500 atm, duration: 5 ps, timestep: "${params.timestep}"}
+
+  # row 7 — final hold at the target pressure
+  - {ensemble: nvt, name: s19_hot7, temperature: "${params.hot_temperature}",
+     duration: 5 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s20_cool7, temperature: "${params.temperature}",
+     duration: 10 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s21_npt, temperature: "${params.temperature}",
+     pressure: "${params.final_pressure}", duration: "${params.final_npt_duration}",
+     timestep: "${params.timestep}"}
+
+steps:
+  check:
+    task: check_polymer_equilibration
+    inputs:
+      thermo: "${s21_npt.thermo}"
+      trajectory: "${s21_npt.trajectory}"
+
+  promote:
+    task: promote_equilibrated_state
+    inputs:
+      state: "${s21_npt.state}"
+      report: "${check.report}"
+    # no condition: if the report says NOT equilibrated, the task fails and
+    # the run is FAILED — finishing the stages is not enough (plan §20).
+
+outputs:
+  equilibrated_state:
+    value: "${promote.state}"
+    description: Validated EquilibratedState; absent if the run failed the gate.
+  final_state:
+    value: "${s21_npt.state}"
+  report:
+    value: "${check.report}"
+  thermo:
+    value: "${s21_npt.thermo}"

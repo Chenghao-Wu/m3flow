@@ -1,0 +1,39 @@
+schema: workflow/v1
+
+name: dynamics_production
+version: 1.0.0
+
+description: >
+  NVE dynamics production from an equilibrated state: unwrapped trajectory
+  for transport/dynamics properties (MSD, diffusion). NVE preserves the
+  natural dynamics (no thermostat artifacts).
+
+kind: scientific_protocol
+domain: [atomistic, bulk]
+purpose: [production, dynamics]
+inputs:
+  state:
+    type: SimulationState
+    required: true
+
+parameters:
+  duration: {type: time, default: 500 ps}
+  timestep: {type: time, default: 1 fs}
+  sampling_interval: {type: time, default: 1 ps}
+  seed: {type: integer, default: 12345}
+
+steps:
+  nve:
+    task: run_nve
+    inputs:
+      state: "${inputs.state}"
+    parameters:
+      duration: "${params.duration}"
+      timestep: "${params.timestep}"
+      sampling_interval: "${params.sampling_interval}"
+      seed: "${params.seed}"
+
+outputs:
+  state: {value: "${nve.state}"}
+  trajectory: {value: "${nve.trajectory}"}
+  thermo: {value: "${nve.thermo}"}

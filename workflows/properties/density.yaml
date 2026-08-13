@@ -1,0 +1,19 @@
+schema: workflow/v1
+name: density
+version: 1.0.0
+description: Mean density from an NPT thermodynamic series (equilibrated tail).
+kind: scientific_protocol
+domain: [bulk]
+purpose: [density]
+inputs:
+  thermo: {type: ThermodynamicSeries, required: true}
+parameters:
+  equilibration_fraction: {type: number, default: 0.5}
+steps:
+  density:
+    task: compute_density
+    inputs: {thermo: "${inputs.thermo}"}
+    parameters:
+      equilibration_fraction: "${params.equilibration_fraction}"
+outputs:
+  result: {value: "${density.result}"}

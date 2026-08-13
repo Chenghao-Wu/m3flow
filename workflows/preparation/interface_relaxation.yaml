@@ -1,0 +1,60 @@
+schema: workflow/v1
+
+name: interface_relaxation
+version: 1.0.0
+
+description: >
+  Polymer/substrate interface relaxation: gentle minimization and low-NVT
+  settling, then an NVT block at the target temperature with the group/group
+  interaction energy recorded (feeds compute_adhesion). Static groups are
+  taken from the system metadata (substrate vs film atom types).
+
+kind: scientific_protocol
+domain: [polymer, interface, atomistic]
+purpose: [equilibration, interface]
+applicability:
+  resolution: atomistic
+  systems: [polymer_on_substrate]
+references: []
+assumptions:
+  - System built with an interface environment (on_substrate packing).
+  - group_a/group_b are LAMMPS group selectors (e.g. "type 1 2 3").
+
+inputs:
+  system:
+    type: SimulationSystem
+    required: true
+
+parameters:
+  temperature: {type: temperature, default: 300 K}
+  settle_temperature: {type: temperature, default: 100 K}
+  settle_duration: {type: time, default: 20 ps}
+  relax_duration: {type: time, default: 100 ps}
+  timestep: {type: time, default: 1 fs}
+  group_a: {type: string, required: true, description: "Film group selector, e.g. 'type 1 2'"}
+  group_b: {type: string, required: true, description: "Substrate group selector"}
+  seed: {type: integer, default: 12345}
+
+stages:
+  - {ensemble: minimize, name: minimize, duration: 5 ps, timestep: 0.5 fs}
+  - {ensemble: nvt, name: settle,
+     temperature: "${params.settle_temperature}", duration: "${params.settle_duration}",
+     timestep: 0.5 fs}
+
+steps:
+  relax:
+    task: run_nvt
+    inputs:
+      state: "${settle.state}"
+    parameters:
+      temperature: "${params.temperature}"
+      duration: "${params.relax_duration}"
+      timestep: "${params.timestep}"
+      interaction:
+        group_a: "${params.group_a}"
+        group_b: "${params.group_b}"
+
+outputs:
+  state: {value: "${relax.state}"}
+  thermo: {value: "${relax.thermo}"}
+  trajectory: {value: "${relax.trajectory}"}

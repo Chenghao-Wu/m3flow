@@ -1,0 +1,19 @@
+schema: workflow/v1
+name: mechanical_properties
+version: 1.0.0
+description: Young's modulus from a stress-strain series (linear initial region).
+kind: scientific_protocol
+domain: [mechanics]
+purpose: [modulus]
+inputs:
+  series: {type: StressStrainSeries, required: true}
+parameters:
+  max_strain: {type: number, default: 0.05}
+steps:
+  modulus:
+    task: fit_modulus
+    inputs: {series: "${inputs.series}"}
+    parameters:
+      max_strain: "${params.max_strain}"
+outputs:
+  result: {value: "${modulus.result}"}

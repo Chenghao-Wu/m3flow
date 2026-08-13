@@ -1,0 +1,52 @@
+schema: workflow/v1
+
+name: temperature_sweep
+version: 1.0.0
+
+description: >
+  NPT at each of a list of temperatures (each starting from the same
+  reference state), collected into one TemperatureSeries — the input of the
+  cte/tg property workflows. Compile-time foreach expansion: one run_npt
+  node per temperature.
+
+kind: scientific_protocol
+domain: [atomistic, bulk, polymer]
+purpose: [production, temperature_sweep]
+inputs:
+  state:
+    type: SimulationState
+    required: true
+
+parameters:
+  temperatures:
+    type: number_list
+    description: Sweep temperatures in Kelvin.
+  pressure: {type: pressure, default: 1 bar}
+  duration_per_point: {type: time, default: 200 ps}
+  timestep: {type: time, default: 1 fs}
+  equilibration_fraction: {type: number, default: 0.5}
+  seed: {type: integer, default: 12345}
+
+steps:
+  sweep:
+    task: run_npt
+    foreach: "${params.temperatures}"
+    as: T
+    inputs:
+      state: "${inputs.state}"
+    parameters:
+      temperature: "${T} K"
+      pressure: "${params.pressure}"
+      duration: "${params.duration_per_point}"
+      timestep: "${params.timestep}"
+      seed: "${params.seed}"
+
+  collect:
+    task: collect_thermo_series
+    inputs:
+      series: "${sweep.thermo}"
+    parameters:
+      equilibration_fraction: "${params.equilibration_fraction}"
+
+outputs:
+  series: {value: "${collect.series}"}

@@ -1,125 +1,279 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://m3flow.dev/schemas/workflow/v1.json",
-  "title": "M3Flow WorkflowSpec",
-  "description": "A Workflow is a composition of Tasks and other Workflows (workflow/v1).",
-  "type": "object",
-  "required": ["schema", "name", "version", "steps"],
-  "additionalProperties": false,
-  "properties": {
-    "schema": {"const": "workflow/v1"},
-    "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
-    "version": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$"},
-    "description": {"type": "string"},
-    "kind": {"type": "string", "enum": ["workflow", "scientific_protocol"], "default": "workflow"},
-    "domain": {"type": "array", "items": {"type": "string"}},
-    "purpose": {"type": "array", "items": {"type": "string"}},
-    "applicability": {"type": "object"},
-    "references": {"type": "array", "items": {"type": "object"}},
-    "assumptions": {"type": "array", "items": {"type": "string"}},
-    "inputs": {
-      "type": "object",
-      "additionalProperties": {
-        "type": "object",
-        "required": ["type"],
-        "additionalProperties": false,
-        "properties": {
-          "type": {"type": "string"},
-          "required": {"type": "boolean", "default": true},
-          "many": {"type": "boolean", "default": false},
-          "description": {"type": "string"}
-        }
-      }
-    },
-    "parameters": {
-      "type": "object",
-      "additionalProperties": {
-        "type": "object",
-        "required": ["type"],
-        "additionalProperties": false,
-        "properties": {
-          "type": {"type": "string"},
-          "required": {"type": "boolean", "default": false},
-          "default": {},
-          "values": {"type": "array", "items": {"type": "string"}},
-          "description": {"type": "string"}
-        }
-      }
-    },
-    "steps": {
-      "type": "object",
-      "minProperties": 1,
-      "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "task": {"type": "string", "description": "task name or name@version"},
-          "workflow": {"type": "string", "description": "workflow name or name@version"},
-          "provider": {"type": "string", "description": "Override implementation selection."},
-          "inputs": {
-            "type": "object",
-            "additionalProperties": {"type": ["string", "array", "object", "boolean", "number", "null"]}
-          },
-          "parameters": {"type": "object"},
-          "condition": {"type": "string", "description": "Boolean expression; node is SKIPPED when false."},
-          "foreach": {"type": ["string", "array"], "description": "Expression evaluating to a list; statically expanded."},
-          "as": {"type": "string", "description": "Loop variable name for foreach."},
-          "retry": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "max_attempts": {"type": "integer", "minimum": 1},
-              "on": {"type": "array", "items": {"type": "string"}}
-            }
-          },
-          "resources": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "cpu": {"type": "integer"},
-              "gpu": {"type": "integer"},
-              "memory": {"type": "string"},
-              "walltime": {"type": "string"}
-            }
-          }
-        },
-        "oneOf": [
-          {"required": ["task"]},
-          {"required": ["workflow"]},
-          {"required": ["foreach"]}
-        ]
-      }
-    },
-    "stages": {
-      "type": "array",
-      "description": "Shorthand for protocol workflows: expanded statically into steps at compile time.",
-      "items": {
-        "type": "object",
-        "required": ["ensemble"],
-        "additionalProperties": false,
-        "properties": {
-          "ensemble": {"type": "string", "enum": ["minimize", "nvt", "npt", "nve"]},
-          "temperature": {},
-          "temperature_start": {},
-          "temperature_end": {},
-          "pressure": {},
-          "duration": {},
-          "timestep": {},
-          "name": {"type": "string"}
-        }
-      }
-    },
-    "outputs": {
-      "type": "object",
-      "additionalProperties": {
-        "type": "object",
-        "required": ["value"],
-        "additionalProperties": false,
-        "properties": {
-          "value": {"type": "string", "description": "Reference expression, e.g. ${density.result}"},
-          "description": {"type": "string"}
-        }
-      }
+ "$schema": "http://json-schema.org/draft-07/schema#",
+ "$id": "https://m3flow.dev/schemas/workflow/v1.json",
+ "title": "M3Flow WorkflowSpec",
+ "description": "A Workflow is a composition of Tasks and other Workflows (workflow/v1).",
+ "type": "object",
+ "required": [
+  "schema",
+  "name",
+  "version",
+  "steps"
+ ],
+ "additionalProperties": false,
+ "properties": {
+  "schema": {
+   "const": "workflow/v1"
+  },
+  "name": {
+   "type": "string",
+   "pattern": "^[a-z][a-z0-9_]*$"
+  },
+  "version": {
+   "type": "string",
+   "pattern": "^\\d+\\.\\d+\\.\\d+$"
+  },
+  "description": {
+   "type": "string"
+  },
+  "kind": {
+   "type": "string",
+   "enum": [
+    "workflow",
+    "scientific_protocol"
+   ],
+   "default": "workflow"
+  },
+  "domain": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "purpose": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "applicability": {
+   "type": "object"
+  },
+  "references": {
+   "type": "array",
+   "items": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "object"
+     }
+    ]
+   },
+   "description": "Literature references: free-form citation strings or structured objects."
+  },
+  "assumptions": {
+   "type": "array",
+   "items": {
+    "type": "string"
+   }
+  },
+  "inputs": {
+   "type": "object",
+   "additionalProperties": {
+    "type": "object",
+    "required": [
+     "type"
+    ],
+    "additionalProperties": false,
+    "properties": {
+     "type": {
+      "type": "string"
+     },
+     "required": {
+      "type": "boolean",
+      "default": true
+     },
+     "many": {
+      "type": "boolean",
+      "default": false
+     },
+     "description": {
+      "type": "string"
+     }
     }
+   }
+  },
+  "parameters": {
+   "type": "object",
+   "additionalProperties": {
+    "type": "object",
+    "required": [
+     "type"
+    ],
+    "additionalProperties": false,
+    "properties": {
+     "type": {
+      "type": "string"
+     },
+     "required": {
+      "type": "boolean",
+      "default": false
+     },
+     "default": {},
+     "values": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "description": {
+      "type": "string"
+     }
+    }
+   }
+  },
+  "steps": {
+   "type": "object",
+   "minProperties": 1,
+   "additionalProperties": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "task": {
+      "type": "string",
+      "description": "task name or name@version"
+     },
+     "workflow": {
+      "type": "string",
+      "description": "workflow name or name@version"
+     },
+     "provider": {
+      "type": "string",
+      "description": "Override implementation selection."
+     },
+     "inputs": {
+      "type": "object",
+      "additionalProperties": {
+       "type": [
+        "string",
+        "array",
+        "object",
+        "boolean",
+        "number",
+        "null"
+       ]
+      }
+     },
+     "parameters": {
+      "type": "object"
+     },
+     "condition": {
+      "type": "string",
+      "description": "Boolean expression; node is SKIPPED when false."
+     },
+     "foreach": {
+      "type": [
+       "string",
+       "array"
+      ],
+      "description": "Expression evaluating to a list; statically expanded."
+     },
+     "as": {
+      "type": "string",
+      "description": "Loop variable name for foreach."
+     },
+     "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+       "max_attempts": {
+        "type": "integer",
+        "minimum": 1
+       },
+       "on": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       }
+      }
+     },
+     "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+       "cpu": {
+        "type": "integer"
+       },
+       "gpu": {
+        "type": "integer"
+       },
+       "memory": {
+        "type": "string"
+       },
+       "walltime": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    "anyOf": [
+     {
+      "required": [
+       "task"
+      ],
+      "description": "Task step; with 'foreach' it expands statically into one node per item."
+     },
+     {
+      "required": [
+       "workflow"
+      ],
+      "description": "Subworkflow step, inlined at compile time."
+     }
+    ]
+   }
+  },
+  "stages": {
+   "type": "array",
+   "description": "Shorthand for protocol workflows: expanded statically into steps at compile time.",
+   "items": {
+    "type": "object",
+    "required": [
+     "ensemble"
+    ],
+    "additionalProperties": false,
+    "properties": {
+     "ensemble": {
+      "type": "string",
+      "enum": [
+       "minimize",
+       "nvt",
+       "npt",
+       "nve"
+      ]
+     },
+     "temperature": {},
+     "temperature_start": {},
+     "temperature_end": {},
+     "pressure": {},
+     "duration": {},
+     "timestep": {},
+     "name": {
+      "type": "string"
+     }
+    }
+   }
+  },
+  "outputs": {
+   "type": "object",
+   "additionalProperties": {
+    "type": "object",
+    "required": [
+     "value"
+    ],
+    "additionalProperties": false,
+    "properties": {
+     "value": {
+      "type": "string",
+      "description": "Reference expression, e.g. ${density.result}"
+     },
+     "description": {
+      "type": "string"
+     }
+    }
+   }
   }
+ }
 }

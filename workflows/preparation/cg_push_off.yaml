@@ -1,0 +1,65 @@
+schema: workflow/v1
+
+name: cg_push_off
+version: 1.0.0
+
+description: >
+  Coarse-grained melt preparation: energy minimization, soft-potential
+  push-off (overlap removal), then NVT equilibration. For bead-spring CG
+  systems from prepare_simulation_system (units lj; temperature values are
+  interpreted as reduced temperature epsilon/kB).
+
+kind: scientific_protocol
+domain: [polymer, coarse_grained, bulk]
+purpose: [equilibration]
+applicability:
+  resolution: coarse_grained
+  systems: [cg_melt]
+references:
+  - "Kremer, Grest, J. Chem. Phys. 92, 5057 (1990) — soft push-off preparation."
+assumptions:
+  - Bead-spring model with explicit LJ parameters; units lj.
+
+inputs:
+  system:
+    type: SimulationSystem
+    required: true
+
+parameters:
+  temperature:
+    type: temperature
+    default: 1 K
+    description: Reduced temperature (value used directly in lj units).
+  pushoff_duration: {type: time, default: 200 ps}
+  nvt_duration: {type: time, default: 500 ps}
+  timestep: {type: time, default: 5 fs}
+  seed: {type: integer, default: 12345}
+
+stages:
+  - {ensemble: minimize, name: minimize, duration: 0 fs, timestep: "${params.timestep}"}
+
+steps:
+  pushoff:
+    task: run_soft_pushoff
+    inputs:
+      state: "${minimize.state}"
+    parameters:
+      temperature: "${params.temperature}"
+      duration: "${params.pushoff_duration}"
+      timestep: "${params.timestep}"
+      seed: "${params.seed}"
+
+  nvt:
+    task: run_nvt
+    inputs:
+      state: "${pushoff.state}"
+    parameters:
+      temperature: "${params.temperature}"
+      duration: "${params.nvt_duration}"
+      timestep: "${params.timestep}"
+      seed: "${params.seed}"
+
+outputs:
+  state: {value: "${nvt.state}"}
+  trajectory: {value: "${nvt.trajectory}"}
+  thermo: {value: "${nvt.thermo}"}

@@ -1,0 +1,84 @@
+schema: workflow/v1
+
+name: polymer_basic_properties
+version: 1.0.0
+
+description: >
+  One-shot basic property panel for an equilibrated polymer: NPT production
+  (density, RDF, Rg, Ree) plus NVE dynamics production (MSD, diffusion).
+  Demonstrates subworkflow composition and fan-out parallelism; re-runs hit
+  the cache per task.
+
+kind: scientific_protocol
+domain: [polymer, bulk]
+purpose: [density, rdf, rg, ree, diffusion]
+inputs:
+  equilibrated_state:
+    type: EquilibratedState
+    required: true
+
+parameters:
+  temperature: {type: temperature, default: 300 K}
+  pressure: {type: pressure, default: 1 bar}
+  npt_duration: {type: time, default: 300 ps}
+  nve_duration: {type: time, default: 300 ps}
+  timestep: {type: time, default: 1 fs}
+  seed: {type: integer, default: 12345}
+
+steps:
+  thermo:
+    workflow: npt_thermodynamic_production
+    inputs:
+      state: "${inputs.equilibrated_state}"
+    parameters:
+      temperature: "${params.temperature}"
+      pressure: "${params.pressure}"
+      duration: "${params.npt_duration}"
+      timestep: "${params.timestep}"
+      seed: "${params.seed}"
+
+  density:
+    task: compute_density
+    inputs:
+      thermo: "${thermo.thermo}"
+
+  rdf:
+    task: compute_rdf
+    inputs:
+      trajectory: "${thermo.trajectory}"
+
+  rg:
+    task: compute_rg
+    inputs:
+      trajectory: "${thermo.trajectory}"
+
+  ree:
+    task: compute_ree
+    inputs:
+      trajectory: "${thermo.trajectory}"
+
+  dynamics:
+    workflow: dynamics_production
+    inputs:
+      state: "${thermo.state}"
+    parameters:
+      duration: "${params.nve_duration}"
+      timestep: "${params.timestep}"
+      seed: "${params.seed}"
+
+  msd:
+    task: compute_msd
+    inputs:
+      trajectory: "${dynamics.trajectory}"
+
+  diffusion:
+    task: fit_diffusion
+    inputs:
+      msd: "${msd.result}"
+
+outputs:
+  density: {value: "${density.result}"}
+  rdf: {value: "${rdf.result}"}
+  rg: {value: "${rg.result}"}
+  ree: {value: "${ree.result}"}
+  diffusion: {value: "${diffusion.result}"}

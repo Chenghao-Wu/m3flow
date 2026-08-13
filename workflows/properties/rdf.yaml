@@ -1,0 +1,23 @@
+schema: workflow/v1
+name: rdf
+version: 1.0.0
+description: Radial distribution function (optionally between LAMMPS atom-type selections).
+kind: scientific_protocol
+domain: [bulk, structure]
+purpose: [rdf]
+inputs:
+  trajectory: {type: Trajectory, required: true}
+parameters:
+  types_a: {type: string_list, description: "LAMMPS numeric atom types; all atoms if unset"}
+  types_b: {type: string_list, description: "LAMMPS numeric atom types; all atoms if unset"}
+  rmax: {type: length, default: 10 angstrom}
+  nbins: {type: integer, default: 200}
+steps:
+  rdf:
+    task: compute_rdf
+    inputs: {trajectory: "${inputs.trajectory}"}
+    parameters:
+      rmax: "${params.rmax}"
+      nbins: "${params.nbins}"
+outputs:
+  result: {value: "${rdf.result}"}

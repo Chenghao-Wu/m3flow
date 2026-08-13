@@ -1,0 +1,19 @@
+schema: workflow/v1
+name: tg
+version: 1.0.0
+description: Glass transition temperature from a bilinear V(T) fit of a TemperatureSeries.
+kind: scientific_protocol
+domain: [polymer, thermodynamics]
+purpose: [tg]
+inputs:
+  series: {type: TemperatureSeries, required: true}
+parameters:
+  min_points_per_branch: {type: integer, default: 3}
+steps:
+  tg:
+    task: fit_tg
+    inputs: {series: "${inputs.series}"}
+    parameters:
+      min_points_per_branch: "${params.min_points_per_branch}"
+outputs:
+  result: {value: "${tg.result}"}

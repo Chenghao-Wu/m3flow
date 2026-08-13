@@ -1,0 +1,25 @@
+schema: workflow/v1
+name: diffusion
+version: 1.0.0
+description: "Self-diffusion coefficient: MSD from an unwrapped trajectory, then Einstein fit."
+kind: scientific_protocol
+domain: [bulk, dynamics]
+purpose: [diffusion]
+inputs:
+  trajectory: {type: Trajectory, required: true}
+parameters:
+  max_lag_fraction: {type: number, default: 0.5}
+  com_by_molecule: {type: boolean, default: false}
+steps:
+  msd:
+    task: compute_msd
+    inputs: {trajectory: "${inputs.trajectory}"}
+    parameters:
+      max_lag_fraction: "${params.max_lag_fraction}"
+      com_by_molecule: "${params.com_by_molecule}"
+  diffusion:
+    task: fit_diffusion
+    inputs: {msd: "${msd.result}"}
+outputs:
+  result: {value: "${diffusion.result}"}
+  msd: {value: "${msd.result}"}

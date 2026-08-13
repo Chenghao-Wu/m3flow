@@ -1,0 +1,20 @@
+schema: workflow/v1
+name: cte
+version: 1.0.0
+description: Volumetric thermal expansion coefficient from a TemperatureSeries.
+kind: scientific_protocol
+domain: [bulk, thermodynamics]
+purpose: [cte]
+inputs:
+  series: {type: TemperatureSeries, required: true}
+parameters:
+  reference_temperature: {type: temperature, description: "Default: median of the sweep"}
+  min_points: {type: integer, default: 3}
+steps:
+  cte:
+    task: fit_cte
+    inputs: {series: "${inputs.series}"}
+    parameters:
+      min_points: "${params.min_points}"
+outputs:
+  result: {value: "${cte.result}"}

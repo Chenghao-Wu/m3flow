@@ -37,6 +37,9 @@ parameters:
   tdamp:
     type: time
     default: 100 fs
+  temperature_end:
+    type: temperature
+    description: If set, ramp temperature linearly from temperature to this value.
   sampling_interval:
     type: time
     default: 1 ps

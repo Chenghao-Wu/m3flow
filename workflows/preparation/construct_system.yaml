@@ -1,0 +1,53 @@
+schema: workflow/v1
+
+name: construct_system
+version: 1.0.0
+
+description: >
+  SystemSpec -> runnable SimulationSystem: the three construction stages
+  (build_system -> parameterize_system -> prepare_simulation_system) in one
+  composable workflow.
+
+kind: scientific_protocol
+domain: [construction]
+purpose: [construction]
+
+inputs:
+  specification:
+    type: SystemSpec
+    required: true
+
+parameters:
+  force_field:
+    type: enum
+    values: [oplsaa, lopls, gaff, gaff2, dreiding, compass]
+    description: "Default: the SystemSpec's resolution.force_field (or oplsaa)."
+  target_density:
+    type: density
+    description: Override the SystemSpec environment target density.
+  strategy: {type: enum, values: [grid, mc_random], default: mc_random}
+  seed: {type: integer, default: 12345}
+
+steps:
+  build:
+    task: build_system
+    inputs:
+      specification: "${inputs.specification}"
+    parameters:
+      seed: "${params.seed}"
+
+  parameterize:
+    task: parameterize_system
+    inputs:
+      system: "${build.system}"
+
+  prepare:
+    task: prepare_simulation_system
+    inputs:
+      system: "${parameterize.system}"
+    parameters:
+      strategy: "${params.strategy}"
+      seed: "${params.seed}"
+
+outputs:
+  system: {value: "${prepare.system}"}

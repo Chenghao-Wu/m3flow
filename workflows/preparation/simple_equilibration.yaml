@@ -1,0 +1,59 @@
+schema: workflow/v1
+
+name: simple_equilibration
+version: 1.0.0
+
+description: >
+  Minimal equilibration: minimize -> NVT -> NPT at the target state point,
+  then the equilibration gate. Suitable for small-molecule liquids and as a
+  quick path for well-behaved systems. Fails the run if the final state is
+  not scientifically equilibrated.
+
+kind: scientific_protocol
+domain: [molecule, atomistic, bulk]
+purpose: [equilibration]
+applicability:
+  resolution: atomistic
+  systems: [small_molecule_liquid, solution, polymer_melt]
+references: []
+assumptions:
+  - Short protocols suffice for low-viscosity small-molecule systems.
+
+inputs:
+  system:
+    type: SimulationSystem
+    required: true
+
+parameters:
+  temperature: {type: temperature, default: 300 K}
+  pressure: {type: pressure, default: 1 bar}
+  nvt_duration: {type: time, default: 50 ps}
+  npt_duration: {type: time, default: 100 ps}
+  timestep: {type: time, default: 1 fs}
+  seed: {type: integer, default: 12345}
+
+stages:
+  - {ensemble: minimize, name: minimize, duration: 5 ps, timestep: 0.5 fs}
+  - {ensemble: nvt, name: nvt,
+     temperature: "${params.temperature}", duration: "${params.nvt_duration}",
+     timestep: "${params.timestep}"}
+  - {ensemble: npt, name: npt,
+     temperature: "${params.temperature}", pressure: "${params.pressure}",
+     duration: "${params.npt_duration}", timestep: "${params.timestep}"}
+
+steps:
+  check:
+    task: check_polymer_equilibration
+    inputs:
+      thermo: "${npt.thermo}"
+      trajectory: "${npt.trajectory}"
+  promote:
+    task: promote_equilibrated_state
+    inputs:
+      state: "${npt.state}"
+      report: "${check.report}"
+
+outputs:
+  equilibrated_state: {value: "${promote.state}"}
+  report: {value: "${check.report}"}
+  thermo: {value: "${npt.thermo}"}

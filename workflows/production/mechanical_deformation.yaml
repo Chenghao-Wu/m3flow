@@ -1,0 +1,41 @@
+schema: workflow/v1
+
+name: mechanical_deformation
+version: 1.0.0
+
+description: >
+  Uniaxial tensile deformation (fix deform, NVT) producing a stress-strain
+  series; feed to fit_modulus or inspect directly.
+
+kind: scientific_protocol
+domain: [atomistic, bulk, polymer]
+purpose: [production, mechanics]
+inputs:
+  state:
+    type: SimulationState
+    required: true
+
+parameters:
+  temperature: {type: temperature, default: 300 K}
+  direction: {type: enum, values: [x, y, z], default: z}
+  strain_rate: {type: number, default: 1e-07, description: "1/fs"}
+  max_strain: {type: number, default: 0.5}
+  timestep: {type: time, default: 1 fs}
+  seed: {type: integer, default: 12345}
+
+steps:
+  deform:
+    task: run_deform
+    inputs:
+      state: "${inputs.state}"
+    parameters:
+      temperature: "${params.temperature}"
+      direction: "${params.direction}"
+      strain_rate: "${params.strain_rate}"
+      max_strain: "${params.max_strain}"
+      timestep: "${params.timestep}"
+      seed: "${params.seed}"
+
+outputs:
+  series: {value: "${deform.series}"}
+  state: {value: "${deform.state}"}

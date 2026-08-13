@@ -1,0 +1,44 @@
+schema: workflow/v1
+
+name: npt_thermodynamic_production
+version: 1.0.0
+
+description: >
+  NPT production run from an equilibrated state, producing the thermodynamic
+  series and trajectory that property workflows consume (plan §22:
+  production and property evaluation are decoupled).
+
+kind: scientific_protocol
+domain: [atomistic, bulk]
+purpose: [production, thermodynamics]
+inputs:
+  state:
+    type: SimulationState
+    required: true
+    description: SimulationState or EquilibratedState.
+
+parameters:
+  temperature: {type: temperature, default: 300 K}
+  pressure: {type: pressure, default: 1 bar}
+  duration: {type: time, default: 500 ps}
+  timestep: {type: time, default: 1 fs}
+  sampling_interval: {type: time, default: 2 ps}
+  seed: {type: integer, default: 12345}
+
+steps:
+  npt:
+    task: run_npt
+    inputs:
+      state: "${inputs.state}"
+    parameters:
+      temperature: "${params.temperature}"
+      pressure: "${params.pressure}"
+      duration: "${params.duration}"
+      timestep: "${params.timestep}"
+      sampling_interval: "${params.sampling_interval}"
+      seed: "${params.seed}"
+
+outputs:
+  state: {value: "${npt.state}"}
+  trajectory: {value: "${npt.trajectory}"}
+  thermo: {value: "${npt.thermo}"}

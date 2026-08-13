@@ -1,0 +1,21 @@
+schema: workflow/v1
+name: adhesion
+version: 1.0.0
+description: Work of adhesion from an interface-relaxation thermodynamic series (interaction-energy column required).
+kind: scientific_protocol
+domain: [interface]
+purpose: [adhesion]
+inputs:
+  thermo: {type: ThermodynamicSeries, required: true}
+parameters:
+  interface_area: {type: area, required: true}
+  equilibration_fraction: {type: number, default: 0.5}
+steps:
+  adhesion:
+    task: compute_adhesion
+    inputs: {thermo: "${inputs.thermo}"}
+    parameters:
+      interface_area: "${params.interface_area}"
+      equilibration_fraction: "${params.equilibration_fraction}"
+outputs:
+  result: {value: "${adhesion.result}"}
