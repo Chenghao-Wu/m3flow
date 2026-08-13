@@ -1,0 +1,58 @@
+schema: workflow/v1
+
+name: peo_silica_adhesion
+version: 1.0.0
+
+description: >
+  Reference run (reduced scale): PEO film on a silica slab.
+  construct_system (interface environment) -> interface_relaxation with
+  group/group interaction energy -> work of adhesion.
+
+kind: workflow
+domain: [polymer, interface, atomistic]
+purpose: [adhesion, reference]
+
+inputs:
+  specification:
+    type: SystemSpec
+    required: true
+
+parameters:
+  temperature: {type: temperature, default: 300 K}
+  interface_area: {type: area, required: true}
+  group_a: {type: string, required: true, description: "Film atom types, e.g. 'type 1 2 3'"}
+  group_b: {type: string, required: true, description: "Substrate atom types"}
+  timestep: {type: time, default: 1 fs}
+  seed: {type: integer, default: 12345}
+
+steps:
+  construct:
+    workflow: construct_system
+    inputs:
+      specification: "${inputs.specification}"
+    parameters:
+      seed: "${params.seed}"
+
+  relax:
+    workflow: interface_relaxation
+    inputs:
+      system: "${construct.system}"
+    parameters:
+      temperature: "${params.temperature}"
+      group_a: "${params.group_a}"
+      group_b: "${params.group_b}"
+      settle_duration: 5 ps
+      relax_duration: 15 ps
+      timestep: "${params.timestep}"
+      seed: "${params.seed}"
+
+  property:
+    workflow: adhesion
+    inputs:
+      thermo: "${relax.thermo}"
+    parameters:
+      interface_area: "${params.interface_area}"
+
+outputs:
+  adhesion: {value: "${property.result}"}
+  state: {value: "${relax.state}"}

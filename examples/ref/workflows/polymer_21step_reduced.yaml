@@ -1,0 +1,68 @@
+schema: workflow/v1
+
+name: polymer_21step_reduced
+version: 0.1.0
+
+description: >
+  REDUCED-SCALE TEST VARIANT of polymer_21step_equilibration@1.0.0 (Larsen
+  schedule, ps-range durations) — for platform validation only, never for
+  production properties. Same 21-stage compression/decompression structure;
+  ~40x shorter stages. Plan §18: protocol changes get a new version, never a
+  silent edit — this fork is therefore a separate name+version.
+
+kind: scientific_protocol
+domain: [polymer, atomistic, bulk]
+purpose: [equilibration, reference, reduced-scale]
+
+inputs:
+  system:
+    type: SimulationSystem
+    required: true
+
+parameters:
+  temperature: {type: temperature, default: 300 K}
+  hot_temperature: {type: temperature, default: 600 K}
+  final_pressure: {type: pressure, default: 1 atm}
+  timestep: {type: time, default: 1 fs}
+  seed: {type: integer, default: 12345}
+
+stages:
+  - {ensemble: minimize, name: s00_minimize, duration: 2 ps, timestep: 0.5 fs}
+  - {ensemble: nvt, name: s01_hot1, temperature: "${params.hot_temperature}", duration: 2 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s02_cool1, temperature: "${params.temperature}", duration: 2 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s03_press1, temperature: "${params.temperature}", pressure: 1000 atm, duration: 2 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s04_hot2, temperature: "${params.hot_temperature}", duration: 2 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s05_cool2, temperature: "${params.temperature}", duration: 3 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s06_press2, temperature: "${params.temperature}", pressure: 30000 atm, duration: 2 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s07_hot3, temperature: "${params.hot_temperature}", duration: 2 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s08_cool3, temperature: "${params.temperature}", duration: 3 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s09_press3, temperature: "${params.temperature}", pressure: 50000 atm, duration: 2 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s10_hot4, temperature: "${params.hot_temperature}", duration: 2 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s11_cool4, temperature: "${params.temperature}", duration: 3 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s12_press4, temperature: "${params.temperature}", pressure: 25000 atm, duration: 1 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s13_hot5, temperature: "${params.hot_temperature}", duration: 1 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s14_cool5, temperature: "${params.temperature}", duration: 2 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s15_press5, temperature: "${params.temperature}", pressure: 5000 atm, duration: 1 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s16_hot6, temperature: "${params.hot_temperature}", duration: 1 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s17_cool6, temperature: "${params.temperature}", duration: 2 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s18_press6, temperature: "${params.temperature}", pressure: 500 atm, duration: 1 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s19_hot7, temperature: "${params.hot_temperature}", duration: 1 ps, timestep: "${params.timestep}"}
+  - {ensemble: nvt, name: s20_cool7, temperature: "${params.temperature}", duration: 2 ps, timestep: "${params.timestep}"}
+  - {ensemble: npt, name: s21_npt, temperature: "${params.temperature}", pressure: "${params.final_pressure}", duration: 10 ps, timestep: "${params.timestep}"}
+
+steps:
+  check:
+    task: check_polymer_equilibration
+    inputs:
+      thermo: "${s21_npt.thermo}"
+      trajectory: "${s21_npt.trajectory}"
+  promote:
+    task: promote_equilibrated_state
+    inputs:
+      state: "${s21_npt.state}"
+      report: "${check.report}"
+
+outputs:
+  equilibrated_state: {value: "${promote.state}"}
+  report: {value: "${check.report}"}
+  thermo: {value: "${s21_npt.thermo}"}

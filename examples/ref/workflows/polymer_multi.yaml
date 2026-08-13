@@ -1,0 +1,58 @@
+schema: workflow/v1
+
+name: polymer_multi
+version: 1.0.0
+
+description: >
+  Reference run (reduced scale): PEO multi-property panel with cache
+  demonstration. construct -> 21-step (reduced) -> polymer_basic_properties.
+  Running it twice proves CACHED reuse of every task.
+
+kind: workflow
+domain: [polymer, atomistic, bulk]
+purpose: [density, rdf, diffusion, reference, cache-demo]
+
+inputs:
+  specification:
+    type: SystemSpec
+    required: true
+
+parameters:
+  temperature: {type: temperature, default: 300 K}
+  timestep: {type: time, default: 1 fs}
+  seed: {type: integer, default: 12345}
+
+steps:
+  construct:
+    workflow: construct_system
+    inputs:
+      specification: "${inputs.specification}"
+    parameters:
+      seed: "${params.seed}"
+
+  equilibrate:
+    workflow: polymer_21step_reduced
+    inputs:
+      system: "${construct.system}"
+    parameters:
+      temperature: "${params.temperature}"
+      timestep: "${params.timestep}"
+      seed: "${params.seed}"
+
+  panel:
+    workflow: polymer_basic_properties
+    inputs:
+      equilibrated_state: "${equilibrate.equilibrated_state}"
+    parameters:
+      temperature: "${params.temperature}"
+      npt_duration: 15 ps
+      nve_duration: 15 ps
+      timestep: "${params.timestep}"
+      seed: "${params.seed}"
+
+outputs:
+  density: {value: "${panel.density}"}
+  rdf: {value: "${panel.rdf}"}
+  rg: {value: "${panel.rg}"}
+  ree: {value: "${panel.ree}"}
+  diffusion: {value: "${panel.diffusion}"}

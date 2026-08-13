@@ -66,8 +66,12 @@ def _universe(traj_input):
         raise ProviderFailure(
             "input_invalid", "input_error",
             "Trajectory artifact needs 'dcd' and 'topology' files")
+    # CAS paths are extensionless; stage with proper names so MDAnalysis
+    # format detection works.
+    shutil.copy(top, "topology.data")
+    shutil.copy(dcd, "traj.dcd")
     try:
-        return mda.Universe(top, dcd, format="LAMMPSDUMP" if False else None)
+        return mda.Universe("topology.data", "traj.dcd", topology_format="DATA")
     except Exception as e:
         raise ProviderFailure(
             "trajectory_corrupt", "input_error",

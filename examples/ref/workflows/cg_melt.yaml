@@ -1,0 +1,45 @@
+schema: workflow/v1
+
+name: cg_melt
+version: 1.0.0
+
+description: >
+  Reference run: Kremer-Grest bead-spring melt from spec to equilibrated CG
+  trajectory. construct_system (CG path) -> cg_push_off.
+
+kind: workflow
+domain: [polymer, coarse_grained]
+purpose: [reference, equilibration]
+
+inputs:
+  specification:
+    type: SystemSpec
+    required: true
+
+parameters:
+  temperature: {type: temperature, default: 1 K}
+  seed: {type: integer, default: 12345}
+
+steps:
+  construct:
+    workflow: construct_system
+    inputs:
+      specification: "${inputs.specification}"
+    parameters:
+      seed: "${params.seed}"
+
+  prepare:
+    workflow: cg_push_off
+    inputs:
+      system: "${construct.system}"
+    parameters:
+      temperature: "${params.temperature}"
+      pushoff_duration: 50 ps
+      nvt_duration: 100 ps
+      timestep: 5 fs
+      seed: "${params.seed}"
+
+outputs:
+  state: {value: "${prepare.state}"}
+  trajectory: {value: "${prepare.trajectory}"}
+  thermo: {value: "${prepare.thermo}"}

@@ -1,0 +1,6 @@
+{
+  "error_type": "schema",
+  "message": "node equilibrate.minimize: schema error: unknown parameter 'duration' for task 'energy_minimize'",
+  "category": "input_error",
+  "recoverable": false
+}

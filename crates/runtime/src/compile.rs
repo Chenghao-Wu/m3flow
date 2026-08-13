@@ -182,7 +182,13 @@ impl<'r> Compiler<'r> {
                 parameters.insert("pressure".into(), p.clone());
             }
             if let Some(d) = &stage.duration {
-                parameters.insert("duration".into(), d.clone());
+                // minimize reads its soft-relaxation length from relax_duration
+                let key = if stage.ensemble == "minimize" {
+                    "relax_duration"
+                } else {
+                    "duration"
+                };
+                parameters.insert(key.into(), d.clone());
             }
             if let Some(dt) = &stage.timestep {
                 parameters.insert("timestep".into(), dt.clone());
@@ -500,6 +506,11 @@ impl<'r> Compiler<'r> {
             let name = r.path.get(1).ok_or_else(|| {
                 M3FlowError::workflow("malformed inputs reference".to_string(), Some(step_id.to_string()))
             })?;
+            // Subworkflow scope: the input was seeded with the parent's
+            // resolved binding — use it (carries the dependency edge).
+            if let Some(ob) = symbols.get(&format!("inputs.{name}")) {
+                return Ok((ob.binding.clone(), ob.artifact_type.clone()));
+            }
             let decl = scope.inputs.get(name).ok_or_else(|| {
                 M3FlowError::workflow(
                     format!("unknown workflow input '{name}'"),

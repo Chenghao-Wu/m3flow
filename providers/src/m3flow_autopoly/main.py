@@ -335,6 +335,16 @@ def prepare_simulation_system(req):
         substrate = _substrate_spec(meta, env)
         if substrate is not None and strategy == "mc_random":
             strategy = "on_substrate"
+        # Builder slabs are constructed to match the box, so the lateral
+        # dims must be explicit. Default: cover the film's aim footprint,
+        # at least 30 A laterally.
+        if substrate is not None and box_size is None and box_dims is None:
+            film_mass = _spec_total_mass(meta.get("components") or [])
+            rho = 0.85 * (target_density or 1.0)
+            lat = 30.0
+            if film_mass:
+                lat = max(30.0, (film_mass / 6.02214076e23 / rho * 1e24) ** (1.0 / 3.0))
+            box_dims = (lat, lat, None)
 
     import AutoPoly
     system = AutoPoly.System(out="autopoly")
@@ -350,10 +360,10 @@ def prepare_simulation_system(req):
         if mass:
             box_size = (mass / 6.02214076e23 / aim_density * 1e24) ** (1.0 / 3.0)
 
-    def pack_once(_density, box=None):
+    def pack_once(_density, box=None, strat=None):
         packer = AutoPoly.BoxPacker(
             system, name,
-            strategy=strategy,
+            strategy=strat or strategy,
             box_size=box if box is not None else box_size,
             box_dims=box_dims,
             mc_max_attempts=int(params.get("mc_max_attempts") or 10000),
@@ -362,27 +372,52 @@ def prepare_simulation_system(req):
             substrate=substrate)
         return packer, packer.pack(build_dir)
 
-    # Random sequential placement saturates; grow the box on failure. Chain
-    # conformers must fit inside the box at all, so when the packer reports
-    # the placement radius, jump straight to 3x it.
+    # Random sequential placement saturates, and a too-loose box makes the
+    # downstream NPT mechanically unstable (negative virial pressure expands
+    # the box instead of condensing). Strategy: place at the aim box; on
+    # failure grow modestly; if random placement still fails, fall back to
+    # grid placement at the aim box (clash-free lattice; minimization melts
+    # the lattice memory). Chain conformers must fit inside the box at all,
+    # so when the packer reports the placement radius, jump straight to 3x.
     import logging, re
     log_capture = _WarningCapture()
     logging.getLogger("AutoPoly.core.logger").addHandler(log_capture)
 
     packer = result = None
     last_err = None
-    trial_box = box_size
+    used_strategy = strategy
+    has_polymers = any((c.get("type") == "polymer")
+                       for c in (meta.get("components") or []))
     try:
-        for attempt in range(8):
+        trial_box = box_size
+        if not has_polymers and substrate is None:
+            # Small molecules: keep the aim box; random once, then grid.
+            for strat in (["mc_random", "grid"] if strategy == "mc_random" else [strategy]):
+                try:
+                    packer, result = pack_once(0.06, box=trial_box, strat=strat)
+                    used_strategy = strat
+                    break
+                except Exception as e:
+                    last_err = e
+        if packer is None:
+            # Polymers (or as a last resort): grow the box until placement
+            # fits; chain conformers need 3x their placement radius.
+            for attempt in range(4):
+                try:
+                    packer, result = pack_once(0.06, box=trial_box)
+                    break
+                except Exception as e:
+                    last_err = e
+                    m = re.search(r"radius ([0-9.]+) A", str(e))
+                    radius_hint = float(m.group(1)) * 3.0 if m else None
+                    base = trial_box if trial_box else (radius_hint or 30.0)
+                    trial_box = max(base * 1.35, radius_hint or 0.0)
+        if packer is None and strategy != "grid" and substrate is None and not has_polymers:
+            used_strategy = "grid"
             try:
-                packer, result = pack_once(0.06, box=trial_box)
-                break
+                packer, result = pack_once(0.06, box=box_size, strat="grid")
             except Exception as e:
                 last_err = e
-                m = re.search(r"radius ([0-9.]+) A", str(e))
-                radius_hint = float(m.group(1)) * 3.0 if m else None
-                base = trial_box if trial_box else (radius_hint or 30.0)
-                trial_box = max(base * 1.35, radius_hint or 0.0)
     finally:
         logging.getLogger("AutoPoly.core.logger").removeHandler(log_capture)
     if packer is None:
@@ -410,6 +445,8 @@ def prepare_simulation_system(req):
 
     clash_info = _clash_info(result, log_capture.records)
     dens_ok, dens_detail = _density_check(mt / "system.data", target_density)
+    if used_strategy != strategy:
+        dens_detail += f" [grid placement fallback at the aim box]"
     if repacks:
         dens_detail += f" [repacked {repacks}x]"
 

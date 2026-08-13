@@ -1,0 +1,63 @@
+schema: workflow/v1
+
+name: ethanol_diffusion
+version: 1.0.0
+
+description: >
+  Reference run (reduced scale): ethanol bulk from SMILES to self-diffusion
+  coefficient. construct_system -> simple_equilibration -> dynamics NVE ->
+  MSD -> Einstein fit. Composes four library workflows as subworkflows.
+
+kind: workflow
+domain: [molecule, atomistic, bulk]
+purpose: [diffusion, reference]
+
+inputs:
+  specification:
+    type: SystemSpec
+    required: true
+
+parameters:
+  temperature: {type: temperature, default: 298 K}
+  nve_duration: {type: time, default: 30 ps}
+  timestep: {type: time, default: 1 fs}
+  seed: {type: integer, default: 12345}
+
+steps:
+  construct:
+    workflow: construct_system
+    inputs:
+      specification: "${inputs.specification}"
+    parameters:
+      seed: "${params.seed}"
+
+  equilibrate:
+    workflow: simple_equilibration
+    inputs:
+      system: "${construct.system}"
+    parameters:
+      temperature: "${params.temperature}"
+      nvt_duration: 10 ps
+      npt_duration: 20 ps
+      timestep: "${params.timestep}"
+      seed: "${params.seed}"
+
+  dynamics:
+    workflow: dynamics_production
+    inputs:
+      state: "${equilibrate.equilibrated_state}"
+    parameters:
+      duration: "${params.nve_duration}"
+      timestep: "${params.timestep}"
+      sampling_interval: 0.5 ps
+      seed: "${params.seed}"
+
+  property:
+    workflow: diffusion
+    inputs:
+      trajectory: "${dynamics.trajectory}"
+
+outputs:
+  diffusion: {value: "${property.result}"}
+  equilibrated_state: {value: "${equilibrate.equilibrated_state}"}
+  report: {value: "${equilibrate.report}"}

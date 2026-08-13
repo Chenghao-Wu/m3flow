@@ -1,0 +1,59 @@
+schema: workflow/v1
+
+name: peo_density
+version: 1.0.0
+
+description: >
+  Reference run (reduced scale): PEO melt from pSMILES to bulk density.
+  construct_system -> polymer_21step_equilibration (reduced durations via a
+  project-local variant) -> NPT production -> density.
+
+kind: workflow
+domain: [polymer, atomistic, bulk]
+purpose: [density, reference]
+
+inputs:
+  specification:
+    type: SystemSpec
+    required: true
+
+parameters:
+  temperature: {type: temperature, default: 300 K}
+  timestep: {type: time, default: 1 fs}
+  seed: {type: integer, default: 12345}
+
+steps:
+  construct:
+    workflow: construct_system
+    inputs:
+      specification: "${inputs.specification}"
+    parameters:
+      seed: "${params.seed}"
+
+  equilibrate:
+    workflow: polymer_21step_reduced
+    inputs:
+      system: "${construct.system}"
+    parameters:
+      temperature: "${params.temperature}"
+      timestep: "${params.timestep}"
+      seed: "${params.seed}"
+
+  produce:
+    workflow: npt_thermodynamic_production
+    inputs:
+      state: "${equilibrate.equilibrated_state}"
+    parameters:
+      temperature: "${params.temperature}"
+      duration: 20 ps
+      timestep: "${params.timestep}"
+      seed: "${params.seed}"
+
+  property:
+    workflow: density
+    inputs:
+      thermo: "${produce.thermo}"
+
+outputs:
+  density: {value: "${property.result}"}
+  report: {value: "${equilibrate.report}"}

@@ -1,0 +1,28 @@
+schema: system/v1
+name: peo_on_silica
+description: Reduced-scale PEO film on hydroxylated alpha-quartz (001).
+components:
+  - id: silica
+    type: substrate
+    representation: {type: name, value: alpha_quartz}
+    options:
+      thickness: 12
+      oh_density: 4.6
+  - id: peo
+    type: polymer
+    representation:
+      type: psmiles
+      first: "CCO[*]"
+      middle: "[*]CCO[*]"
+      last: "[*]CCO"
+    degree_of_polymerization: 6
+    number_of_chains: 3
+    topology: linear
+    tacticity: atactic
+environment:
+  type: interface
+  normal: z
+  gap: {value: 3.0, unit: angstrom}
+resolution:
+  type: atomistic
+  force_field: oplsaa

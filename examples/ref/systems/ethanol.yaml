@@ -5,7 +5,7 @@ components:
   - id: ethanol
     type: molecule
     representation: {type: smiles, value: "CCO"}
-    count: 40
+    count: 42
 environment:
   type: bulk
   target_density: {value: 0.789, unit: g/cm3}
