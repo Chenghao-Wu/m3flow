@@ -1,7 +1,5 @@
 # M3Flow
-
-A **task-centric, artifact-driven, provenance-first** workflow runtime for
-molecular simulation. *M*ultiscale *M*olecular *M*odeling workFLOW(M3Flow) sits between coding agents (Claude Code, etc.)
+**M**ultiscale **M**olecular **M**odeling workFLOW(M3Flow) sits between coding agents (Claude Code, etc.)
 or human researchers and simulation software (AutoPoly, LAMMPS), providing a
 stable, discoverable, composable, and fully tracked execution environment.
 
@@ -26,18 +24,34 @@ treated as proof of equilibration.
 
 ## Install
 
+**From a release (recommended):**
+
 ```bash
-# Rust core + CLI + TUI
-cargo build --release          # binary: target/release/m3flow
+# 1. Download the m3flow binary for your platform from
+#    https://github.com/WuGroup-XJTLU/m3flow/releases/latest
+#    and put it on PATH (tarball for Linux/macOS, zip for Windows;
+#    the linux-musl build is fully static and works on older clusters).
+tar xzf m3flow-<version>-<target>.tar.gz
+sudo install m3flow-<version>-<target>/m3flow /usr/local/bin/
 
-# Providers (Python, JSON protocol processes on PATH)
-pip install -e providers/      # m3flow-autopoly, m3flow-lammps, m3flow-analysis
+# 2. Providers (Python, JSON-protocol processes on PATH)
+pip install m3flow-providers   # or: download the .whl from the release
+                               # page and `pip install` that file
 
-# Engines
+# 3. Engines
 #   AutoPoly: importable in the provider's Python env
 #   LAMMPS:   `lmp` on PATH, or configure in m3flow.yaml:
 #             providers: {lammps: {engine: {executable: /path/to/lmp}}}
 ```
+
+**From source:**
+
+```bash
+cargo build --release          # binary: target/release/m3flow
+pip install -e providers/      # m3flow-autopoly, m3flow-lammps, m3flow-analysis
+```
+
+Verify: `m3flow provider list` (all providers "ok"), `m3flow task list`, `m3flow workflow list`.
 
 ## Quickstart
 

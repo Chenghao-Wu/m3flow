@@ -132,17 +132,34 @@ runtime, not by convention.
 
 ## 2. Installation
 
+**From a release (recommended):**
+
+```bash
+# 1. Download the m3flow binary for your platform from
+#    https://github.com/WuGroup-XJTLU/m3flow/releases/latest
+#    (tarball for Linux/macOS, zip for Windows; the linux-musl build
+#    is fully static and works on older clusters).
+tar xzf m3flow-<version>-<target>.tar.gz
+sudo install m3flow-<version>-<target>/m3flow /usr/local/bin/
+
+# 2. Providers (Python; JSON-protocol processes on PATH)
+pip install m3flow-providers   # or: download the .whl from the release
+                               # page and `pip install` that file
+
+# 3. Engines
+#   AutoPoly: importable in the provider's Python environment
+#   LAMMPS:   `lmp` on PATH, or configure in m3flow.yaml:
+#             providers: {lammps: {engine: {executable: /path/to/lmp}}}
+```
+
+**From source:**
+
 ```bash
 # Rust core + CLI + TUI
 cargo build --release          # binary: target/release/m3flow
 
 # Providers (Python; JSON-protocol processes on PATH)
 pip install -e providers/      # m3flow-autopoly, m3flow-lammps, m3flow-analysis
-
-# Engines
-#   AutoPoly: importable in the provider's Python environment
-#   LAMMPS:   `lmp` on PATH, or configure in m3flow.yaml:
-#             providers: {lammps: {engine: {executable: /path/to/lmp}}}
 ```
 
 Verify:
