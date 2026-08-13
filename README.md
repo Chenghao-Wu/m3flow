@@ -82,7 +82,7 @@ tasks/       the 19-task atomic library (autopoly/lammps/analysis)
 workflows/   the 18-workflow library (preparation/production/properties)
 crates/      Rust workspace: core, registry, runtime, cli, tui
 providers/   Python provider processes (m3flow-provider/1 protocol)
-docs/        provider protocol, concepts, authoring guides
+docs/        manual.md (complete reference) + focused docs
 examples/    reference projects (reduced-scale end-to-end runs)
 ```
 
@@ -125,4 +125,4 @@ tails carry real statistical drift, and the equilibration gate says so.
 - Providers are separate processes speaking `m3flow-provider/1` (single JSON
   document on stdout); the runtime owns ingestion into the CAS.
 
-See `docs/` for the full contract.
+See `docs/manual.md` for the complete reference, `docs/` for focused documents.
