@@ -504,9 +504,11 @@ def _run_outputs(ctx, has_trajectory, thermo, request_meta_extra=None):
         n_frames = _dcd_frames(ctx.workdir / "traj.dcd")
         outputs["trajectory"] = artifact(
             "Trajectory",
-            files={"dcd": "traj.dcd"},
+            files={"dcd": "traj.dcd", "topology": ctx.data_file},
             metadata={
                 "format": "dcd",
+                "topology_format": "lammps_data",
+                "units": ctx.units,
                 "timestep_fs": ctx.time_fs("timestep", 1.0),
                 "frame_interval_fs": ctx.time_fs("sampling_interval", 1000.0),
             },
