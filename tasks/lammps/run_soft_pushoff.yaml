@@ -1,0 +1,63 @@
+schema: task/v1
+
+name: run_soft_pushoff
+version: 1.0.0
+
+description: >
+  Soft-potential push-off for coarse-grained (or highly overlapping) systems:
+  ramp a soft pair potential from zero while running NVE/limit + Langevin,
+  then restore the full potential. Standard CG melt preparation step.
+
+category: simulation
+
+tags:
+  - md
+  - coarse-grained
+  - push-off
+  - lammps
+
+inputs:
+  system:
+    type: SimulationSystem
+    required: false
+  state:
+    type: SimulationState
+    required: false
+
+parameters:
+  temperature:
+    type: temperature
+    default: 300 K
+  duration:
+    type: time
+    required: true
+  timestep:
+    type: time
+    default: 10 fs
+    description: CG models typically tolerate much larger timesteps.
+  seed:
+    type: integer
+    default: 12345
+  sampling_interval:
+    type: time
+    default: 5 ps
+  thermo_interval:
+    type: time
+    default: 0.5 ps
+
+outputs:
+  state:
+    type: SimulationState
+  log:
+    type: SimulationLog
+  thermo:
+    type: ThermodynamicSeries
+
+validation:
+  - simulation_completed
+  - no_nan
+  - no_lost_atoms
+
+implementations:
+  - provider: lammps
+    default: true

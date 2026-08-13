@@ -1,0 +1,38 @@
+schema: task/v1
+
+name: fit_diffusion
+version: 1.0.0
+
+description: >
+  Self-diffusion coefficient from the Einstein relation: linear fit of the
+  MSD in the diffusive regime, D = slope / 6.
+
+category: analysis
+
+tags:
+  - diffusion
+  - dynamics
+  - transport
+
+inputs:
+  msd:
+    type: MSDResult
+    required: true
+
+parameters:
+  fit_start_fraction:
+    type: number
+    default: 0.2
+    description: Start of the linear fit window (fraction of max lag).
+  fit_end_fraction:
+    type: number
+    default: 0.8
+    description: End of the linear fit window (fraction of max lag).
+
+outputs:
+  result:
+    type: DiffusionResult
+
+implementations:
+  - provider: analysis
+    default: true

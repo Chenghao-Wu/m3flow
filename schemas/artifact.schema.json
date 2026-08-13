@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://m3flow.dev/schemas/artifact/v1.json",
+  "title": "M3Flow Artifact",
+  "description": "Artifact record as stored in the provenance DB and returned by providers (artifact/v1).",
+  "type": "object",
+  "required": ["id", "type", "schema_version", "files", "metadata"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"type": "string", "pattern": "^art_[0-9a-f]{8}$"},
+    "type": {"type": "string", "description": "Artifact type from the type hierarchy, e.g. ProductionTrajectory."},
+    "schema_version": {"type": "string"},
+    "files": {
+      "type": "object",
+      "description": "Named files. Values are store-relative paths.",
+      "additionalProperties": {"type": "string"}
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Scientific metadata used for compatibility checks (ensemble, temperature, observables, ...)."
+    },
+    "data": {
+      "type": ["object", "null"],
+      "description": "Inline JSON payload for Result-type artifacts (small numeric results, reports)."
+    },
+    "content_hash": {"type": "string"},
+    "producer": {"type": ["string", "null"], "description": "task_run id that generated this artifact."},
+    "created_at": {"type": "string"}
+  }
+}

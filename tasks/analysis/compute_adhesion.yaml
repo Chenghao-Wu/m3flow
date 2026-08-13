@@ -1,0 +1,41 @@
+schema: task/v1
+
+name: compute_adhesion
+version: 1.0.0
+
+description: >
+  Interface adhesion estimate from the polymer/substrate interaction energy:
+  work of adhesion W = -E_int / A (kcal/mol/angstrom2 converted to mJ/m2).
+
+category: analysis
+
+tags:
+  - adhesion
+  - interface
+
+inputs:
+  thermo:
+    type: ThermodynamicSeries
+    required: true
+    description: Series containing an interaction-energy column.
+
+parameters:
+  interface_area:
+    type: area
+    required: true
+    description: Cross-sectional area of the interface.
+  equilibration_fraction:
+    type: number
+    default: 0.5
+
+outputs:
+  result:
+    type: AdhesionResult
+
+requirements:
+  observables:
+    - interaction_energy
+
+implementations:
+  - provider: analysis
+    default: true

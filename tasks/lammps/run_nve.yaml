@@ -1,0 +1,70 @@
+schema: task/v1
+
+name: run_nve
+version: 1.0.0
+
+description: >
+  Run molecular dynamics in the microcanonical (NVE) ensemble. Typical use:
+  dynamics production after NVT/NPT equilibration for transport properties.
+
+category: simulation
+
+tags:
+  - md
+  - nve
+  - dynamics
+  - lammps
+
+inputs:
+  system:
+    type: SimulationSystem
+    required: false
+  state:
+    type: SimulationState
+    required: false
+
+parameters:
+  temperature:
+    type: temperature
+    description: >
+      Velocity initialization temperature when the input has no velocities
+      (e.g. straight from construction). Ignored otherwise.
+  duration:
+    type: time
+    required: true
+  timestep:
+    type: time
+    default: 1 fs
+  sampling_interval:
+    type: time
+    default: 1 ps
+  thermo_interval:
+    type: time
+    default: 0.1 ps
+  seed:
+    type: integer
+    default: 12345
+
+outputs:
+  state:
+    type: SimulationState
+  trajectory:
+    type: Trajectory
+  log:
+    type: SimulationLog
+  thermo:
+    type: ThermodynamicSeries
+
+validation:
+  - simulation_completed
+  - no_nan
+  - no_lost_atoms
+  - trajectory_readable
+
+implementations:
+  - provider: lammps
+    default: true
+
+resources:
+  cpu: 8
+  walltime: 2 h

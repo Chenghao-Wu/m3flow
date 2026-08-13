@@ -1,0 +1,47 @@
+schema: task/v1
+
+name: parameterize_system
+version: 1.0.0
+
+description: >
+  Assign force-field atom types and charges to a MolecularSystem.
+  Stage 2 of system construction. For coarse-grained systems this is a
+  pass-through that records the CG model in the artifact metadata.
+
+category: construction
+
+tags:
+  - autopoly
+  - force-field
+  - typing
+
+inputs:
+  system:
+    type: MolecularSystem
+    required: true
+
+parameters:
+  force_field:
+    type: enum
+    values: [oplsaa, lopls, gaff, gaff2, dreiding, compass]
+    description: >
+      Atomistic force field. Defaults to the SystemSpec's
+      resolution.force_field (or oplsaa if unset). Ignored for
+      coarse-grained resolution.
+  charge_method:
+    type: enum
+    values: [force_field, gasteiger]
+    description: Charge assignment override for force fields that allow it.
+
+outputs:
+  system:
+    type: ParameterizedSystem
+    description: Typed units ready for box packing.
+
+validation:
+  - all_atoms_typed
+  - net_charge_sane
+
+implementations:
+  - provider: autopoly
+    default: true

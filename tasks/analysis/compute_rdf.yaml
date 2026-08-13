@@ -1,0 +1,45 @@
+schema: task/v1
+
+name: compute_rdf
+version: 1.0.0
+
+description: >
+  Radial distribution function g(r) from a trajectory. Optionally restricted
+  to LAMMPS numeric atom-type selections (partial RDF).
+
+category: analysis
+
+tags:
+  - rdf
+  - structure
+
+inputs:
+  trajectory:
+    type: Trajectory
+    required: true
+
+parameters:
+  types_a:
+    type: string_list
+    description: Numeric atom types for selection A (default all atoms).
+  types_b:
+    type: string_list
+    description: Numeric atom types for selection B (default all atoms).
+  rmax:
+    type: length
+    default: 10 angstrom
+  nbins:
+    type: integer
+    default: 200
+
+outputs:
+  result:
+    type: RDFResult
+
+requirements:
+  observables:
+    - coordinates
+
+implementations:
+  - provider: analysis
+    default: true

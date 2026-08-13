@@ -1,0 +1,32 @@
+schema: task/v1
+
+name: fit_modulus
+version: 1.0.0
+
+description: >
+  Young's modulus from the initial linear region of a stress-strain series.
+
+category: analysis
+
+tags:
+  - modulus
+  - mechanical
+
+inputs:
+  series:
+    type: StressStrainSeries
+    required: true
+
+parameters:
+  max_strain:
+    type: number
+    default: 0.05
+    description: Upper strain of the linear fit window.
+
+outputs:
+  result:
+    type: ModulusResult
+
+implementations:
+  - provider: analysis
+    default: true

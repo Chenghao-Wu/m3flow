@@ -1,0 +1,45 @@
+schema: task/v1
+
+name: compute_msd
+version: 1.0.0
+
+description: >
+  Mean-squared displacement versus lag time from unwrapped coordinates.
+  Suitable input for fit_diffusion.
+
+category: analysis
+
+tags:
+  - msd
+  - dynamics
+  - transport
+
+inputs:
+  trajectory:
+    type: Trajectory
+    required: true
+
+parameters:
+  max_lag_fraction:
+    type: number
+    default: 0.5
+    description: Maximum lag time as a fraction of the trajectory length.
+  com_by_molecule:
+    type: boolean
+    default: false
+    description: Track per-molecule centers of mass instead of per-atom MSD.
+
+outputs:
+  result:
+    type: MSDResult
+
+requirements:
+  observables:
+    - coordinates
+    - unwrapped_coordinates
+  needs_time_axis: true
+  dynamics_sensitive: true
+
+implementations:
+  - provider: analysis
+    default: true

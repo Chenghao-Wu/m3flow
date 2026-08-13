@@ -1,0 +1,39 @@
+schema: task/v1
+
+name: promote_equilibrated_state
+version: 1.0.0
+
+description: >
+  Promote a SimulationState to an EquilibratedState, gated on a passing
+  EquilibrationReport. This is the only way EquilibratedState artifacts come
+  into existence: running an equilibration protocol alone never suffices
+  without scientific validation (plan §20).
+
+category: validation
+
+tags:
+  - equilibration
+  - validation
+  - state
+
+inputs:
+  state:
+    type: SimulationState
+    required: true
+  report:
+    type: EquilibrationReport
+    required: true
+
+parameters:
+  require_pass:
+    type: boolean
+    default: true
+    description: Fail with a scientific validation error when the report is negative.
+
+outputs:
+  state:
+    type: EquilibratedState
+
+implementations:
+  - provider: analysis
+    default: true

@@ -1,0 +1,94 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://m3flow.dev/schemas/system/v1.json",
+  "title": "M3Flow SystemSpec",
+  "description": "What to simulate: Composition x Environment x Resolution (system/v1). The core interface to system construction providers such as AutoPoly.",
+  "type": "object",
+  "required": ["schema", "name", "components", "environment", "resolution"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "system/v1"},
+    "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "version": {"type": "string", "default": "1.0.0"},
+    "description": {"type": "string"},
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "representation"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+          "type": {"enum": ["molecule", "polymer", "substrate", "particle"]},
+          "representation": {
+            "type": "object",
+            "required": ["type"],
+            "additionalProperties": false,
+            "properties": {
+              "type": {"enum": ["smiles", "psmiles", "sequence", "name", "file", "bead_spring"]},
+              "value": {"type": "string", "description": "SMILES / pSMILES / component name / file path."},
+              "sequence": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Explicit complement-SMILES sequence (first, middle..., last)."
+              },
+              "first": {"type": "string", "description": "First-unit complement SMILES for DOP expansion."},
+              "middle": {"type": "string"},
+              "last": {"type": "string"}
+            }
+          },
+          "topology": {"enum": ["linear", "ring", "star", "comb", "graft", "dendrimer", "branched"]},
+          "tacticity": {"enum": ["atactic", "isotactic", "syndiotactic"]},
+          "degree_of_polymerization": {"type": "integer", "minimum": 1},
+          "number_of_chains": {"type": "integer", "minimum": 1},
+          "count": {"type": "integer", "minimum": 1, "description": "Molecule count for molecule components."},
+          "force_field": {"type": "string"},
+          "charge_method": {"type": "string"},
+          "bead_spring": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "architecture": {"type": "string"},
+              "bead_types": {"type": "array", "items": {"type": "object"}},
+              "bond_types": {"type": "array", "items": {"type": "object"}}
+            }
+          },
+          "options": {"type": "object", "description": "Provider-specific extra options."}
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"enum": ["isolated", "bulk", "mixture", "interface", "film", "confined"]},
+        "target_density": {"description": "Quantity, e.g. \"0.85 g/cm3\"."},
+        "box": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "x": {}, "y": {}, "z": {}
+          }
+        },
+        "normal": {"enum": ["x", "y", "z"]},
+        "lower": {"type": "string", "description": "Component id forming the lower side of an interface."},
+        "upper": {"type": "string"},
+        "gap": {"description": "Initial gap between interface sides, e.g. \"3 angstrom\"."},
+        "temperature": {},
+        "options": {"type": "object"}
+      }
+    },
+    "resolution": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"enum": ["atomistic", "coarse_grained"]},
+        "model": {"type": "string", "description": "CG model name when resolution is coarse_grained."},
+        "force_field": {"type": "string", "description": "Force field for atomistic resolution, e.g. oplsaa, gaff2."}
+      }
+    }
+  }
+}

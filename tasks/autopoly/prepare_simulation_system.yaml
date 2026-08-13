@@ -1,0 +1,51 @@
+schema: task/v1
+
+name: prepare_simulation_system
+version: 1.0.0
+
+description: >
+  Pack a ParameterizedSystem into a simulation box and emit a runnable
+  SimulationSystem (LAMMPS data file + force-field includes). Stage 3 of
+  system construction. Honors the SystemSpec environment (bulk density,
+  interface geometry, ...) carried in the input artifact metadata.
+
+category: construction
+
+tags:
+  - autopoly
+  - packing
+  - moltemplate
+
+inputs:
+  system:
+    type: ParameterizedSystem
+    required: true
+
+parameters:
+  target_density:
+    type: density
+    description: Override the SystemSpec environment target density.
+  strategy:
+    type: enum
+    values: [grid, mc_random]
+    default: mc_random
+    description: Box packing placement strategy.
+  mc_max_attempts:
+    type: integer
+    default: 10000
+  seed:
+    type: integer
+    default: 12345
+
+outputs:
+  system:
+    type: SimulationSystem
+    description: Runnable system (data + init/settings/charges includes).
+
+validation:
+  - density_within_tolerance
+  - no_clashing_overlap
+
+implementations:
+  - provider: autopoly
+    default: true

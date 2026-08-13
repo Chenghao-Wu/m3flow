@@ -1,0 +1,69 @@
+schema: task/v1
+
+name: energy_minimize
+version: 1.0.0
+
+description: >
+  Minimize the potential energy of a system or an existing simulation state.
+  Optionally precedes the quench with a short soft dynamics relaxation
+  (NVE/limit + Langevin) to relieve clashes in freshly packed systems.
+
+category: simulation
+
+tags:
+  - md
+  - minimization
+  - lammps
+
+inputs:
+  system:
+    type: SimulationSystem
+    required: false
+    description: Freshly constructed system (exactly one of system/state).
+  state:
+    type: SimulationState
+    required: false
+    description: Existing state to re-minimize.
+
+parameters:
+  etol:
+    type: number
+    default: 1.0e-6
+    description: Energy tolerance (unitless stopping criterion).
+  ftol:
+    type: number
+    default: 1.0e-8
+    description: Force tolerance (kcal/mol/angstrom in real units).
+  maxiter:
+    type: integer
+    default: 10000
+  maxeval:
+    type: integer
+    default: 100000
+  relax_duration:
+    type: time
+    default: 0 fs
+    description: >
+      If > 0, run a soft NVE/limit + Langevin relaxation for this long
+      before the conjugate-gradient quench.
+  relax_temperature:
+    type: temperature
+    default: 10 K
+  timestep:
+    type: time
+    default: 0.5 fs
+
+outputs:
+  state:
+    type: SimulationState
+  log:
+    type: SimulationLog
+
+validation:
+  - simulation_completed
+  - no_nan
+  - no_lost_atoms
+
+implementations:
+  - provider: lammps
+    default: true

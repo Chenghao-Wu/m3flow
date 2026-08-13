@@ -1,0 +1,68 @@
+schema: task/v1
+
+name: run_deform
+version: 1.0.0
+
+description: >
+  Uniaxial tensile deformation in an NVT ensemble (fix deform erate).
+  Produces a stress-strain series for mechanical property estimation.
+
+category: sampling
+
+tags:
+  - md
+  - deformation
+  - mechanical
+  - lammps
+
+inputs:
+  state:
+    type: SimulationState
+    required: true
+
+parameters:
+  direction:
+    type: enum
+    values: [x, y, z]
+    default: z
+  strain_rate:
+    type: number
+    default: 1.0e-7
+    description: Engineering strain rate in 1/fs.
+  max_strain:
+    type: number
+    default: 0.5
+    description: Final engineering strain (unitless).
+  temperature:
+    type: temperature
+    required: true
+  timestep:
+    type: time
+    default: 1 fs
+  sampling_interval:
+    type: time
+    default: 0.5 ps
+  seed:
+    type: integer
+    default: 12345
+
+outputs:
+  state:
+    type: SimulationState
+  series:
+    type: StressStrainSeries
+  log:
+    type: SimulationLog
+
+validation:
+  - simulation_completed
+  - no_nan
+  - no_lost_atoms
+
+implementations:
+  - provider: lammps
+    default: true
+
+resources:
+  cpu: 8
+  walltime: 4 h

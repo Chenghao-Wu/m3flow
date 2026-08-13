@@ -1,0 +1,49 @@
+schema: task/v1
+
+name: check_polymer_equilibration
+version: 1.0.0
+
+description: >
+  Scientific validation of an equilibration protocol: density drift, energy
+  and volume stationarity over the tail of the series, plus Rg/Ree stability
+  when a trajectory is supplied. Produces the EquilibrationReport that gates
+  EquilibratedState promotion.
+
+category: validation
+
+tags:
+  - equilibration
+  - validation
+  - polymer
+
+inputs:
+  thermo:
+    type: ThermodynamicSeries
+    required: true
+  trajectory:
+    type: Trajectory
+    required: false
+  log:
+    type: SimulationLog
+    required: false
+
+parameters:
+  density_drift_threshold:
+    type: number
+    default: 0.01
+    description: Max allowed relative density drift between tail halves.
+  stationarity_sigma:
+    type: number
+    default: 3.0
+    description: Stationarity test tolerance in standard deviations.
+  tail_fraction:
+    type: number
+    default: 0.5
+
+outputs:
+  report:
+    type: EquilibrationReport
+
+implementations:
+  - provider: analysis
+    default: true

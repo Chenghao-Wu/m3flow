@@ -1,0 +1,40 @@
+schema: task/v1
+
+name: fit_tg
+version: 1.0.0
+
+description: >
+  Glass transition temperature from a bilinear fit of the specific volume
+  V(T): intersection of the rubbery and glassy branches. The sweep must
+  bracket Tg for the fit to be meaningful.
+
+category: analysis
+
+tags:
+  - tg
+  - glass-transition
+  - polymer
+
+inputs:
+  series:
+    type: TemperatureSeries
+    required: true
+
+parameters:
+  min_points_per_branch:
+    type: integer
+    default: 3
+
+outputs:
+  result:
+    type: TgResult
+
+requirements:
+  varying:
+    - temperature
+  observables:
+    - volume
+
+implementations:
+  - provider: analysis
+    default: true

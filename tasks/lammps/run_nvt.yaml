@@ -1,0 +1,79 @@
+schema: task/v1
+
+name: run_nvt
+version: 1.0.0
+
+description: Run molecular dynamics in the canonical (NVT) ensemble.
+
+category: simulation
+
+tags:
+  - md
+  - nvt
+  - lammps
+
+inputs:
+  system:
+    type: SimulationSystem
+    required: false
+  state:
+    type: SimulationState
+    required: false
+
+parameters:
+  temperature:
+    type: temperature
+    required: true
+  duration:
+    type: time
+    required: true
+  timestep:
+    type: time
+    default: 1 fs
+  thermostat:
+    type: enum
+    values: [nose_hoover, langevin, berendsen]
+    default: nose_hoover
+  tdamp:
+    type: time
+    default: 100 fs
+  sampling_interval:
+    type: time
+    default: 1 ps
+    description: Trajectory frame interval.
+  thermo_interval:
+    type: time
+    default: 0.1 ps
+    description: Thermodynamic logging interval.
+  seed:
+    type: integer
+    default: 12345
+  interaction:
+    type: map
+    description: >
+      Optional {"group_a": "...", "group_b": "..."} LAMMPS group selectors;
+      adds a group/group interaction-energy column to the thermo series.
+
+outputs:
+  state:
+    type: SimulationState
+  trajectory:
+    type: Trajectory
+  log:
+    type: SimulationLog
+  thermo:
+    type: ThermodynamicSeries
+
+validation:
+  - simulation_completed
+  - no_nan
+  - no_lost_atoms
+  - trajectory_readable
+
+implementations:
+  - provider: lammps
+    default: true
+
+resources:
+  cpu: 8
+  walltime: 2 h

@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/registry", "crates/runtime", "crates/cli", "crates/tui"]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2021"
+license = "BSD-3-Clause"
+repository = "https://github.com/WuGroup-XJTLU/m3flow"
+description = "Task-centric, artifact-driven, provenance-first scientific workflow runtime for molecular simulation"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+sha2 = "0.10"
+hex = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+semver = "1"
+include_dir = "0.7"
+rusqlite = { version = "0.32", features = ["bundled"] }
+jsonschema = "0.30"
+clap = { version = "4", features = ["derive"] }
+shellexpand = "3"
+ratatui = "0.29"
+crossterm = "0.28"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

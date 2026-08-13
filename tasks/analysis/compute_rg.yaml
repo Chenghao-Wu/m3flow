@@ -1,0 +1,37 @@
+schema: task/v1
+
+name: compute_rg
+version: 1.0.0
+
+description: >
+  Radius of gyration statistics of polymer chains (identified by molecule id)
+  over a trajectory.
+
+category: analysis
+
+tags:
+  - rg
+  - polymer
+  - structure
+
+inputs:
+  trajectory:
+    type: Trajectory
+    required: true
+
+parameters:
+  equilibration_fraction:
+    type: number
+    default: 0.5
+
+outputs:
+  result:
+    type: RgResult
+
+requirements:
+  observables:
+    - coordinates
+
+implementations:
+  - provider: analysis
+    default: true

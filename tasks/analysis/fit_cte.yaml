@@ -1,0 +1,41 @@
+schema: task/v1
+
+name: fit_cte
+version: 1.0.0
+
+description: >
+  Volumetric thermal expansion coefficient alpha = (1/V)(dV/dT) from a linear
+  fit of V(T) around a reference temperature.
+
+category: analysis
+
+tags:
+  - cte
+  - thermodynamics
+
+inputs:
+  series:
+    type: TemperatureSeries
+    required: true
+
+parameters:
+  reference_temperature:
+    type: temperature
+    description: "Reference T for alpha (default: median of the sweep)."
+  min_points:
+    type: integer
+    default: 3
+
+outputs:
+  result:
+    type: CTEResult
+
+requirements:
+  varying:
+    - temperature
+  observables:
+    - volume
+
+implementations:
+  - provider: analysis
+    default: true

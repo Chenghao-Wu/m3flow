@@ -1,0 +1,22 @@
+[package]
+name = "m3flow-cli"
+description = "M3Flow command line interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "m3flow"
+path = "src/main.rs"
+
+[dependencies]
+m3flow-core = { path = "../core" }
+m3flow-registry = { path = "../registry" }
+m3flow-runtime = { path = "../runtime" }
+m3flow-tui = { path = "../tui" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+clap.workspace = true
+shellexpand.workspace = true
+chrono.workspace = true

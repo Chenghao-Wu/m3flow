@@ -1,0 +1,35 @@
+schema: task/v1
+
+name: compute_ree
+version: 1.0.0
+
+description: Mean end-to-end distance of polymer chains over a trajectory.
+
+category: analysis
+
+tags:
+  - ree
+  - polymer
+  - structure
+
+inputs:
+  trajectory:
+    type: Trajectory
+    required: true
+
+parameters:
+  equilibration_fraction:
+    type: number
+    default: 0.5
+
+outputs:
+  result:
+    type: ReeResult
+
+requirements:
+  observables:
+    - coordinates
+
+implementations:
+  - provider: analysis
+    default: true

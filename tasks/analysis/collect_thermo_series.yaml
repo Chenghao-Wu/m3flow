@@ -1,0 +1,33 @@
+schema: task/v1
+
+name: collect_thermo_series
+version: 1.0.0
+
+description: >
+  Fan-in: collect the thermodynamic series of a temperature sweep into one
+  TemperatureSeries artifact (per-member means of volume/density/energy).
+
+category: utility
+
+tags:
+  - fan-in
+  - temperature-sweep
+
+inputs:
+  series:
+    type: ThermodynamicSeries
+    required: true
+    many: true
+
+parameters:
+  equilibration_fraction:
+    type: number
+    default: 0.5
+
+outputs:
+  series:
+    type: TemperatureSeries
+
+implementations:
+  - provider: analysis
+    default: true

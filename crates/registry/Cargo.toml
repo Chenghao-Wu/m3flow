@@ -1,0 +1,16 @@
+[package]
+name = "m3flow-registry"
+description = "M3Flow spec registry: loading, validation, version resolution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+m3flow-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+semver.workspace = true
+include_dir.workspace = true
+jsonschema.workspace = true

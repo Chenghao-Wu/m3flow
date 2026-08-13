@@ -1,0 +1,43 @@
+schema: task/v1
+
+name: build_system
+version: 1.0.0
+
+description: >
+  Build the force-field-agnostic geometry of a molecular system from a
+  SystemSpec (chains, conformers, placements). Stage 1 of system construction.
+
+category: construction
+
+tags:
+  - autopoly
+  - geometry
+  - construction
+
+inputs:
+  specification:
+    type: SystemSpec
+    required: true
+
+parameters:
+  use_mc_chain_growth:
+    type: boolean
+    default: false
+    description: Grow polymer chains with a self-avoiding random walk.
+  seed:
+    type: integer
+    default: 12345
+    description: Random seed for stochastic geometry generation.
+
+outputs:
+  system:
+    type: MolecularSystem
+    description: Geometry + component composition, force-field independent.
+
+validation:
+  - geometry_complete
+  - component_counts_match
+
+implementations:
+  - provider: autopoly
+    default: true

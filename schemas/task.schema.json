@@ -1,0 +1,115 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://m3flow.dev/schemas/task/v1.json",
+  "title": "M3Flow TaskSpec",
+  "description": "A Task is one scientifically meaningful operation with a well-defined input/output contract (task/v1).",
+  "type": "object",
+  "required": ["schema", "name", "version", "category", "inputs", "parameters", "outputs"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "task/v1"},
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "Snake-case task name, unique per version."
+    },
+    "version": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$"},
+    "description": {"type": "string"},
+    "category": {
+      "type": "string",
+      "enum": ["construction", "simulation", "sampling", "analysis", "validation", "utility"]
+    },
+    "tags": {"type": "array", "items": {"type": "string"}},
+    "inputs": {
+      "type": "object",
+      "description": "Named artifact inputs.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type"],
+        "additionalProperties": false,
+        "properties": {
+          "type": {"type": "string", "description": "Artifact type, e.g. SimulationState. Subtypes accepted."},
+          "required": {"type": "boolean", "default": true},
+          "many": {"type": "boolean", "default": false, "description": "Bind a list of artifacts (fan-in)."},
+          "description": {"type": "string"}
+        }
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type"],
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["string", "integer", "number", "boolean", "enum",
+                     "temperature", "pressure", "time", "length", "density", "energy", "area",
+                     "string_list", "number_list", "map"]
+          },
+          "required": {"type": "boolean", "default": false},
+          "default": {},
+          "unit": {"type": "string", "description": "Expected canonical unit for quantity parameters."},
+          "values": {"type": "array", "items": {"type": "string"}, "description": "Allowed values for enum."},
+          "description": {"type": "string"}
+        }
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type"],
+        "additionalProperties": false,
+        "properties": {
+          "type": {"type": "string"},
+          "description": {"type": "string"}
+        }
+      }
+    },
+    "requirements": {
+      "type": "object",
+      "description": "Data requirements checked against input artifact metadata (artifact compatible).",
+      "additionalProperties": false,
+      "properties": {
+        "ensemble": {"type": "array", "items": {"type": "string"}},
+        "observables": {"type": "array", "items": {"type": "string"}},
+        "varying": {"type": "array", "items": {"type": "string"}},
+        "needs_time_axis": {"type": "boolean"},
+        "dynamics_sensitive": {"type": "boolean"},
+        "resolution": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "validation": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Named scientific validators the implementation must run, e.g. no_nan."
+    },
+    "implementations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["provider"],
+        "additionalProperties": false,
+        "properties": {
+          "provider": {"type": "string"},
+          "provider_version": {"type": "string"},
+          "default": {"type": "boolean", "default": false}
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {"type": "integer"},
+        "gpu": {"type": "integer"},
+        "memory": {"type": "string"},
+        "walltime": {"type": "string"}
+      }
+    },
+    "metadata": {"type": "object"}
+  }
+}

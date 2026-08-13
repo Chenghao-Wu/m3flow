@@ -1,0 +1,40 @@
+schema: task/v1
+
+name: compute_density
+version: 1.0.0
+
+description: >
+  Mean density and its standard error over the equilibrated tail of an NPT
+  thermodynamic series.
+
+category: analysis
+
+tags:
+  - density
+  - thermodynamics
+
+inputs:
+  thermo:
+    type: ThermodynamicSeries
+    required: true
+    description: Thermodynamic series containing a density column.
+
+parameters:
+  equilibration_fraction:
+    type: number
+    default: 0.5
+    description: Fraction of the series discarded as equilibration before averaging.
+
+outputs:
+  result:
+    type: DensityResult
+
+requirements:
+  ensemble:
+    - NPT
+  observables:
+    - density
+
+implementations:
+  - provider: analysis
+    default: true
