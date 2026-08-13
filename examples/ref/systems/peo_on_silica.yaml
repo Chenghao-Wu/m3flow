@@ -26,3 +26,9 @@ environment:
 resolution:
   type: atomistic
   force_field: oplsaa
+
+# NOTE: atom-type group selectors for the interaction energy depend on the
+# typed output. After construct_system, list types by mass:
+#   Si ~28.1 (slab), O ~16.0 (slab+film), C/H (film) — inspect the artifact's
+#   data file Masses section, then pass group_a (film types) / group_b (slab
+#   types) to peo_silica_adhesion.
