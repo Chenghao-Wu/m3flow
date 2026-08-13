@@ -136,7 +136,7 @@ runtime, not by convention.
 
 ```bash
 # 1. Download the m3flow binary for your platform from
-#    https://github.com/WuGroup-XJTLU/m3flow/releases/latest
+#    https://github.com/Chenghao-Wu/m3flow/releases/latest
 #    (tarball for Linux/macOS, zip for Windows; the linux-musl build
 #    is fully static and works on older clusters).
 tar xzf m3flow-<version>-<target>.tar.gz

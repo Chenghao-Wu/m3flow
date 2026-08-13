@@ -6,7 +6,7 @@ members = ["crates/core", "crates/registry", "crates/runtime", "crates/cli", "cr
 version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/WuGroup-XJTLU/m3flow"
+repository = "https://github.com/Chenghao-Wu/m3flow"
 description = "Task-centric, artifact-driven, provenance-first scientific workflow runtime for molecular simulation"
 
 [workspace.dependencies]
