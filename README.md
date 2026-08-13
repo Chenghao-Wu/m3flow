@@ -1,7 +1,7 @@
 # M3Flow
 
 A **task-centric, artifact-driven, provenance-first** workflow runtime for
-molecular simulation. M3Flow sits between coding agents (Claude Code, etc.)
+molecular simulation. *M*ultiscale *M*olecular *M*odeling workFLOW(M3Flow) sits between coding agents (Claude Code, etc.)
 or human researchers and simulation software (AutoPoly, LAMMPS), providing a
 stable, discoverable, composable, and fully tracked execution environment.
 
