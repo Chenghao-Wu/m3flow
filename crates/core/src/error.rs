@@ -94,28 +94,42 @@ impl M3FlowError {
     }
 
     pub fn schema(message: impl Into<String>) -> Self {
-        Self::Schema { message: message.into(), details: Vec::new() }
+        Self::Schema {
+            message: message.into(),
+            details: Vec::new(),
+        }
     }
 
     pub fn workflow(message: impl Into<String>, step: Option<String>) -> Self {
-        Self::Workflow { message: message.into(), step }
+        Self::Workflow {
+            message: message.into(),
+            step,
+        }
     }
 
     pub fn not_found(message: impl Into<String>) -> Self {
-        Self::NotFound { message: message.into() }
+        Self::NotFound {
+            message: message.into(),
+        }
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::Internal { message: message.into() }
+        Self::Internal {
+            message: message.into(),
+        }
     }
 
     pub fn io(err: std::io::Error, context: impl Into<String>) -> Self {
-        Self::Io { message: format!("{}: {}", context.into(), err) }
+        Self::Io {
+            message: format!("{}: {}", context.into(), err),
+        }
     }
 }
 
 impl From<std::io::Error> for M3FlowError {
     fn from(e: std::io::Error) -> Self {
-        Self::Io { message: e.to_string() }
+        Self::Io {
+            message: e.to_string(),
+        }
     }
 }

@@ -134,14 +134,25 @@ impl TaskSpec {
     }
 
     /// Canonicalize a raw parameter value against its declaration.
-    pub fn canonical_param(&self, name: &str, raw: &serde_json::Value) -> Result<serde_json::Value> {
-        let decl = self.parameters.get(name).ok_or_else(|| M3FlowError::Schema {
-            message: format!("unknown parameter '{name}' for task '{}'", self.name),
-            details: vec![format!(
-                "declared parameters: {}",
-                self.parameters.keys().cloned().collect::<Vec<_>>().join(", ")
-            )],
-        })?;
+    pub fn canonical_param(
+        &self,
+        name: &str,
+        raw: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let decl = self
+            .parameters
+            .get(name)
+            .ok_or_else(|| M3FlowError::Schema {
+                message: format!("unknown parameter '{name}' for task '{}'", self.name),
+                details: vec![format!(
+                    "declared parameters: {}",
+                    self.parameters
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )],
+            })?;
         canonicalize_param(&self.name, name, decl, raw)
     }
 }
@@ -191,29 +202,30 @@ pub fn canonicalize_param(
             }
         }
         "string_list" => {
-            let arr = raw
-                .as_array()
-                .ok_or_else(|| M3FlowError::schema(format!("{}: expected list of strings", ctx())))?;
+            let arr = raw.as_array().ok_or_else(|| {
+                M3FlowError::schema(format!("{}: expected list of strings", ctx()))
+            })?;
             let mut out = Vec::with_capacity(arr.len());
             for x in arr {
                 out.push(serde_json::Value::String(
                     x.as_str()
-                        .ok_or_else(|| M3FlowError::schema(format!("{}: expected list of strings", ctx())))?
+                        .ok_or_else(|| {
+                            M3FlowError::schema(format!("{}: expected list of strings", ctx()))
+                        })?
                         .to_string(),
                 ));
             }
             Ok(serde_json::Value::Array(out))
         }
         "number_list" => {
-            let arr = raw
-                .as_array()
-                .ok_or_else(|| M3FlowError::schema(format!("{}: expected list of numbers", ctx())))?;
+            let arr = raw.as_array().ok_or_else(|| {
+                M3FlowError::schema(format!("{}: expected list of numbers", ctx()))
+            })?;
             let mut out = Vec::with_capacity(arr.len());
             for x in arr {
-                out.push(serde_json::Value::from(
-                    x.as_f64()
-                        .ok_or_else(|| M3FlowError::schema(format!("{}: expected list of numbers", ctx())))?,
-                ));
+                out.push(serde_json::Value::from(x.as_f64().ok_or_else(|| {
+                    M3FlowError::schema(format!("{}: expected list of numbers", ctx()))
+                })?));
             }
             Ok(serde_json::Value::Array(out))
         }
@@ -311,6 +323,29 @@ pub struct StageSpec {
     pub temperature_end: Option<serde_json::Value>,
     #[serde(default)]
     pub pressure: Option<serde_json::Value>,
+    #[serde(default)]
+    pub pressure_start: Option<serde_json::Value>,
+    #[serde(default)]
+    pub pressure_end: Option<serde_json::Value>,
+    /// Barostat keyword style for npt stages: iso | aniso | tri | xyz
+    /// (xyz = per-axis x/y/z control; see LAMMPS fix nh).
+    #[serde(default)]
+    pub pressure_style: Option<String>,
+    /// Axis coupling for pressure_style = xyz: xyz | xy | xz | yz | none.
+    #[serde(default)]
+    pub couple: Option<String>,
+    #[serde(default)]
+    pub pressure_x: Option<serde_json::Value>,
+    #[serde(default)]
+    pub pressure_x_end: Option<serde_json::Value>,
+    #[serde(default)]
+    pub pressure_y: Option<serde_json::Value>,
+    #[serde(default)]
+    pub pressure_y_end: Option<serde_json::Value>,
+    #[serde(default)]
+    pub pressure_z: Option<serde_json::Value>,
+    #[serde(default)]
+    pub pressure_z_end: Option<serde_json::Value>,
     #[serde(default)]
     pub duration: Option<serde_json::Value>,
     #[serde(default)]

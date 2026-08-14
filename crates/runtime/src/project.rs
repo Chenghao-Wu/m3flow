@@ -52,6 +52,17 @@ pub struct Defaults {
     pub provider_selection: BTreeMap<String, String>,
     #[serde(default)]
     pub max_concurrency: Option<usize>,
+    /// Friendly `results/` tree materialization (presentation-only:
+    /// never joins cache keys or fingerprints).
+    #[serde(default)]
+    pub materialize: Option<MaterializeConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MaterializeConfig {
+    /// Default: true.
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,7 +142,11 @@ impl Project {
         if let Some(regs) = &self.config.registries {
             for dirs in regs.values() {
                 for d in dirs {
-                    out.push(if d.is_absolute() { d.clone() } else { self.root.join(d) });
+                    out.push(if d.is_absolute() {
+                        d.clone()
+                    } else {
+                        self.root.join(d)
+                    });
                 }
             }
         }
@@ -157,10 +172,26 @@ impl Project {
             .and_then(|d| d.provider_selection.get(task))
             .map(|s| s.as_str())
     }
+
+    /// Always-on friendly `results/` tree (default: enabled).
+    pub fn materialize_enabled(&self) -> bool {
+        self.config
+            .defaults
+            .as_ref()
+            .and_then(|d| d.materialize.as_ref())
+            .and_then(|m| m.enabled)
+            .unwrap_or(true)
+    }
+
+    pub fn results_dir(&self) -> PathBuf {
+        self.root.join("results")
+    }
 }
 
 fn default_concurrency() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
 }
 
 /// Git context for reproducibility metadata (plan §54). All fields optional:

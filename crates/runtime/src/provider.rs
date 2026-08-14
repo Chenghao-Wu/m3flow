@@ -85,8 +85,8 @@ impl ProviderHandle {
             .output()
             .map_err(|e| M3FlowError::io(e, format!("spawning {}", self.executable.display())))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|e| {
-            M3FlowError::Provider {
+        let parsed: serde_json::Value =
+            serde_json::from_str(stdout.trim()).map_err(|e| M3FlowError::Provider {
                 provider: self.name.clone(),
                 message: format!(
                     "invalid JSON from '{subcommand}' (exit {}): {e}\nstderr: {}",
@@ -98,8 +98,7 @@ impl ProviderHandle {
                 ),
                 details: None,
                 raw_log: None,
-            }
-        })?;
+            })?;
         Ok(parsed)
     }
 
@@ -128,8 +127,14 @@ impl ProviderHandle {
     pub fn engine_version(&mut self) -> Result<String> {
         let d = self.describe()?;
         let engine = d.get("engine").cloned().unwrap_or(serde_json::json!({}));
-        let name = engine.get("name").and_then(|x| x.as_str()).unwrap_or("unknown");
-        let version = engine.get("version").and_then(|x| x.as_str()).unwrap_or("unknown");
+        let name = engine
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown");
+        let version = engine
+            .get("version")
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown");
         Ok(format!("{name}/{version}"))
     }
 
@@ -156,7 +161,11 @@ impl ProviderHandle {
 fn which(exe: &str) -> Option<PathBuf> {
     let p = Path::new(exe);
     if p.components().count() > 1 || exe.starts_with('.') || exe.starts_with('/') {
-        return if p.is_file() { Some(p.to_path_buf()) } else { None };
+        return if p.is_file() {
+            Some(p.to_path_buf())
+        } else {
+            None
+        };
     }
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {

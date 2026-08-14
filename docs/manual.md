@@ -105,7 +105,12 @@ a DAG with a small expression language. The compiler expands everything
   steps.
 - **stages** — MD shorthand: `{ensemble: npt, temperature: 300 K,
   duration: 50 ps}` expands to a chained run task. `minimize`'s `duration`
-  maps to `relax_duration`.
+  maps to `relax_duration`. Temperature and pressure ramp linearly with the
+  engine's native fix keywords: `temperature_start`/`temperature_end`
+  (nvt/npt) and `pressure_start`/`pressure_end` (npt). NPT barostat control:
+  `pressure_style: iso|aniso|tri|xyz`, `couple: xyz|xy|xz|yz|none` (xyz
+  style only), and per-axis `pressure_x/y/z` (+`_end`) — unset axes are not
+  barostated, matching LAMMPS fix nh semantics.
 - **foreach** — `foreach: ${params.temperatures} as: T` expands statically
   at compile time into `step__0`, `step__1`, … (max 256). Referencing the
   base name (`${sweep.thermo}`) in a `many: true` input collects all
@@ -269,6 +274,12 @@ providers:
 defaults: {...}
 ```
 
+For the LAMMPS provider, the effective core count is the task/step
+`resources.cpu` if declared, else `engine.np`, else 1 (serial). With more
+than one core the engine runs via `mpirun -np N` (override the launcher with
+`engine.launcher`); `engine.mpi: false` selects OpenMP threading
+(`OMP_NUM_THREADS` + `-sf omp`) instead of MPI ranks.
+
 Project layout after a run:
 
 ```
@@ -375,6 +386,7 @@ stderr). Exit codes for runs: `0` COMPLETED, `2` FAILED, `3` CANCELLED;
 | `workflow plan <name> [--param k=v]` | compiled DAG, no execution |
 | `workflow run <name> [--input n=art/@f] [--param k=v] [--no-cache] [--max-concurrency N] [--dry-run]` | execute |
 | `run list [--limit N]` | recent runs |
+| `run status <wr>` | one-call composite: run + steps + failure + suggested next command |
 | `run inspect <wr>` | run record + per-step status |
 | `run logs <wr> [--step prefix]` | per-step response documents, workdir files |
 | `run graph <wr>` | dependency graph with statuses |
@@ -391,6 +403,46 @@ stderr). Exit codes for runs: `0` COMPLETED, `2` FAILED, `3` CANCELLED;
 | `provider list` | providers, availability, engine versions |
 | `provider diagnose <name>` | locate + `describe` a provider |
 | `cache stats` / `cache clear` | cache inspection and management |
+| `results sync [--run <wr>]` | rebuild friendly results/ tree(s) from the provenance DB |
+| `run label <wr> [name]` | set/clear a run's study label (moves its results/ folder) |
+| `tui [wr]` | interactive execution cockpit |
+
+### The `results/` tree
+
+Every run materializes a human-browsable view of its outputs as it
+executes (disable per-run with `workflow run --no-materialize`, or
+project-wide via `defaults: {materialize: {enabled: false}}`):
+
+```
+results/<group>/<YYYY-MM-DD>_<HH-MM>_<workflow>_<wr_id>/
+  run.json                     run summary + step → artifact map
+  _inputs/<name>/              workflow inputs
+  NN_<step>/<ArtifactType>/    symlinks to output files + _artifact.yaml
+```
+
+`<group>` is the run's **study label** (`workflow run --label
+peo-5k-screen`) when it has one, or the workflow name when it doesn't — a
+study folder collects runs across workflow types and reruns, while
+unlabeled runs behave exactly as before. Labels are validated
+(`[A-Za-z0-9._-]`, max 64 chars, starting with a letter or digit) and are
+purely presentational: they never enter spec hashes, cache keys, or
+artifact identity. Rename a study with `m3flow run label <wr> <new-name>`
+(omit the name to clear) — the run's folder moves immediately. Do not
+`mv` folders by hand: the label lives in the provenance DB and the next
+`results sync` would resurrect the old name.
+
+The timestamp is the run's `created_at` in UTC (same clock as run.json
+and the database records).
+
+Files are relative symlinks into the content-addressed store, and
+`_artifact.yaml` in each directory carries the artifact id, type, content
+hash, and producer — the tree is *operable*: feed any artifact id you
+find here straight into the next workflow. Nothing under `results/` is
+authoritative (the DB + store are truth); store blobs are read-only, so
+the view can never mutate them. Rebuild any tree any time with
+`m3flow results sync` — without `--run` it wipes `results/` first, so
+orphans from deleted runs or renamed studies disappear.
+
 | `tui [wr]` | interactive execution cockpit |
 
 IDs: `art_…` artifact, `tr_…` task run, `wr_…` workflow run. Commands take
@@ -412,6 +464,15 @@ carries exactly one JSON document; diagnostics go to stderr.
 - `run inspect --json` → `{run: {...}, tasks: [TaskRunRecord…]}` with
   `{id, node_id, task_name, task_version, provider, status, attempts,
   params, error, validation, engine, started_at, ended_at, cache_key}`.
+- `run status --json` → the agent-oriented composite, answering "did it
+  fail, where, and what now?" in one call (replaces the inspect + logs +
+  graph loop): `{run: {id, workflow, label, status, created_at,
+  started_at, ended_at}, results_dir, materialized, steps: [{node, task,
+  status, attempts, outputs: {role: art_id}}], failure: {step, category,
+  recoverable, message} | null, next: "m3flow run retry …" | null}`.
+  `next` is the single most useful follow-up command: retry for
+  recoverable failures, logs for permanent ones, resume for cancelled
+  runs, null when there is nothing to do.
 - `run graph --json` → `{nodes: [{id, task, label, status}], edges:
   [{from, to}]}`.
 - `artifact inspect --json` → `{id, type, schema_version, content_hash,
@@ -693,6 +754,28 @@ steps:
 outputs:
   state: {value: "${nvt.state}"}
   report: {value: "${check.report}"}
+```
+
+**Native ramps and barostat control** (LAMMPS fix nh keywords, linear
+start→stop over the stage):
+
+```yaml
+stages:
+  # heat 10 K -> 300 K during NVT
+  - {ensemble: nvt, name: heat,
+     temperature: 10 K, temperature_end: 300 K, duration: 50 ps}
+  # decompress 10 bar -> 1 bar during NPT (isotropic)
+  - {ensemble: npt, name: decompress,
+     temperature: 300 K, pressure: 10 bar, pressure_end: 1 bar, duration: 500 ps}
+  # per-axis barostat, e.g. slab/interface: z-only pressure control
+  - {ensemble: npt, name: slab,
+     temperature: 300 K, pressure_style: xyz, pressure_z: 1 bar, duration: 100 ps}
+  # coupled in-plane + independent normal, x/y ramping 10 -> 1 bar
+  - {ensemble: npt, name: membrane,
+     temperature: 300 K, pressure_style: xyz, couple: xy,
+     pressure_x: 10 bar, pressure_x_end: 1 bar,
+     pressure_y: 10 bar, pressure_y_end: 1 bar,
+     pressure_z: 1 bar, duration: 200 ps}
 ```
 
 **References**: `${inputs.x}` (workflow input), `${step.output}` (artifact

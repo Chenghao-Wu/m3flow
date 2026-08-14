@@ -28,8 +28,8 @@ parameters:
   strategy: {type: enum, values: [grid, mc_random], default: mc_random}
   use_mc_chain_growth:
     type: boolean
-    default: false
-    description: "Grow chains coiled (smaller bounding spheres); helps film/interface packing."
+    default: true
+    description: "Grow chains coiled via self-avoiding random walk (default on; smaller bounding spheres, helps film/interface packing). Set false for straight-rod deterministic placement."
   seed: {type: integer, default: 12345}
 
 steps:

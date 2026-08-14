@@ -44,6 +44,8 @@ pub struct RunContext {
     /// Nodes seeded from a previous run (`run resume`): successful nodes
     /// keep their outputs and are not re-executed.
     pub resume: BTreeMap<String, ResumedNode>,
+    /// Always-on friendly `results/` tree (presentation-only, best-effort).
+    pub materialize: bool,
     pub progress: Option<Box<dyn Fn(&str) + Send>>,
 }
 
@@ -104,9 +106,7 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
                     task_run: resumed.and_then(|r| r.task_run.clone()),
                     attempts: 0,
                     cache_key: None,
-                    outputs: resumed
-                        .map(|r| r.outputs.clone())
-                        .unwrap_or_default(),
+                    outputs: resumed.map(|r| r.outputs.clone()).unwrap_or_default(),
                 },
             )
         })
@@ -115,6 +115,20 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
     ctx.run.status = RunStatus::Running;
     ctx.run.started_at = Some(now_rfc3339());
     ctx.db.update_workflow_run(&ctx.run)?;
+
+    // friendly results/ tree: inputs + initial run.json (best-effort)
+    if ctx.materialize {
+        if let Err(e) = crate::materialize::materialize_run_inputs(
+            &ctx.project,
+            &ctx.store,
+            &ctx.db,
+            &ctx.run,
+            &ctx.workflow_inputs,
+        ) {
+            ctx.progress(&format!("warning: materialize(inputs) failed: {e}"));
+        }
+        write_run_json_view(&ctx, &states);
+    }
 
     let (tx, rx): (Sender<Outcome>, Receiver<Outcome>) = channel();
     let mut running = 0usize;
@@ -151,7 +165,12 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
             let dep_statuses: Vec<TaskStatus> = node
                 .deps
                 .iter()
-                .map(|d| states.get(d).map(|s| s.status).unwrap_or(TaskStatus::Pending))
+                .map(|d| {
+                    states
+                        .get(d)
+                        .map(|s| s.status)
+                        .unwrap_or(TaskStatus::Pending)
+                })
                 .collect();
             if dep_statuses.iter().any(|s| *s == TaskStatus::Skipped) {
                 set_status(&mut ctx, &mut states, &node.id, TaskStatus::Skipped, None)?;
@@ -255,14 +274,7 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
 
             // dispatch real execution
             let attempt = states[&node.id].attempts + 1;
-            let job = build_job(
-                &ctx,
-                &node,
-                &task_spec,
-                &resolved,
-                handle.clone(),
-                attempt,
-            )?;
+            let job = build_job(&ctx, &node, &task_spec, &resolved, handle.clone(), attempt)?;
             {
                 let st = states.get_mut(&node.id).unwrap();
                 st.status = TaskStatus::Running;
@@ -327,6 +339,9 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
     ctx.run.status = final_status;
     ctx.run.ended_at = Some(now_rfc3339());
     ctx.db.update_workflow_run(&ctx.run)?;
+    if ctx.materialize {
+        write_run_json_view(&ctx, &states);
+    }
     Ok(ctx.run.clone())
 }
 
@@ -407,12 +422,12 @@ fn resolve_node(
     let mut params = serde_json::Map::new();
     for (pname, pval) in &node.params {
         let resolved = resolve_value_refs(ctx, states, pval, &node.id)?;
-        let canonical = task
-            .canonical_param(pname, &resolved)
-            .map_err(|e| M3FlowError::Schema {
-                message: format!("node {}: {e}", node.id),
-                details: vec![],
-            })?;
+        let canonical =
+            task.canonical_param(pname, &resolved)
+                .map_err(|e| M3FlowError::Schema {
+                    message: format!("node {}: {e}", node.id),
+                    details: vec![],
+                })?;
         params.insert(pname.clone(), canonical);
     }
     // apply task defaults for unprovided params
@@ -896,7 +911,92 @@ fn apply_cache_hit(
         st.task_run = Some(tr_id);
         st.outputs = map;
     }
+    if ctx.materialize {
+        let arts: Vec<(String, Artifact)> = states[&node.id]
+            .outputs
+            .iter()
+            .filter_map(|(r, aid)| {
+                ctx.db
+                    .get_artifact(aid.as_str())
+                    .ok()
+                    .map(|a| (r.clone(), a))
+            })
+            .collect();
+        materialize_step(ctx, states, node, &arts);
+    }
     Ok(())
+}
+
+// ------------------------------------------------------------------ results view
+
+/// Scheduler-private state → run.json snapshot.
+fn step_views(
+    compiled: &CompiledWorkflow,
+    states: &BTreeMap<String, NodeState>,
+) -> Vec<crate::materialize::StepView> {
+    compiled
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let st = &states[&n.id];
+            crate::materialize::StepView {
+                order: i + 1,
+                node_id: n.id.clone(),
+                status: st.status.as_str().to_string(),
+                task_run: st.task_run.as_ref().map(|t| t.to_string()),
+                outputs: st
+                    .outputs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.to_string()))
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+fn write_run_json_view(ctx: &RunContext, states: &BTreeMap<String, NodeState>) {
+    let inputs: BTreeMap<String, String> = ctx
+        .workflow_inputs
+        .iter()
+        .map(|(k, v)| (k.clone(), v.to_string()))
+        .collect();
+    if let Err(e) = crate::materialize::write_run_json(
+        &ctx.project,
+        &ctx.run,
+        &inputs,
+        &step_views(&ctx.compiled, states),
+    ) {
+        ctx.progress(&format!("warning: run.json failed: {e}"));
+    }
+}
+
+/// Materialize one step's outputs + refresh run.json. Best-effort by
+/// contract: the results/ tree is a derived view, never run-critical.
+fn materialize_step(
+    ctx: &RunContext,
+    states: &BTreeMap<String, NodeState>,
+    node: &IrNode,
+    arts: &[(String, Artifact)],
+) {
+    let order = ctx
+        .compiled
+        .nodes
+        .iter()
+        .position(|n| n.id == node.id)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    if let Err(e) = crate::materialize::materialize_step_outputs(
+        &ctx.project,
+        &ctx.store,
+        &ctx.run,
+        order,
+        &node.id,
+        arts,
+    ) {
+        ctx.progress(&format!("{}: warning: materialize failed: {e}", node.id));
+    }
+    write_run_json_view(ctx, states);
 }
 
 fn handle_outcome(
@@ -920,12 +1020,14 @@ fn handle_outcome(
                 ctx.progress(&format!("{}: warning: {w}", node.id));
             }
             let mut map = BTreeMap::new();
+            let mut mat_artifacts: Vec<(String, Artifact)> = Vec::new();
             for (oname, artifact, rows) in outputs {
                 let aid = artifact.id.clone();
                 ctx.db.insert_artifact(&artifact, &rows)?;
                 ctx.db
                     .link_output(outcome.task_run_id.as_str(), &oname, aid.as_str())?;
-                map.insert(oname, aid);
+                map.insert(oname.clone(), aid);
+                mat_artifacts.push((oname, artifact));
             }
             for (iname, ids) in collect_input_ids(ctx, states, &node) {
                 for id in ids {
@@ -963,6 +1065,9 @@ fn handle_outcome(
                 }
             }
             ctx.progress(&format!("{}: COMPLETED", node.id));
+            if ctx.materialize {
+                materialize_step(ctx, states, &node, &mat_artifacts);
+            }
         }
         OutcomeKind::Failed {
             error,
@@ -983,7 +1088,14 @@ fn handle_outcome(
             );
             if should_retry {
                 states.get_mut(&node.id).unwrap().status = TaskStatus::Pending;
-                persist_task_run(ctx, states, &node.id, TaskStatus::Pending, Some(error), None)?;
+                persist_task_run(
+                    ctx,
+                    states,
+                    &node.id,
+                    TaskStatus::Pending,
+                    Some(error),
+                    None,
+                )?;
                 ctx.progress(&format!(
                     "{}: attempt {} failed ({}); retrying",
                     node.id, outcome.attempt, category
@@ -1006,12 +1118,9 @@ fn collect_input_ids(
     let mut out = BTreeMap::new();
     for (name, binding) in &node.inputs {
         let ids: Vec<ArtifactId> = match binding {
-            InputBinding::WorkflowInput { name } => ctx
-                .workflow_inputs
-                .get(name)
-                .cloned()
-                .into_iter()
-                .collect(),
+            InputBinding::WorkflowInput { name } => {
+                ctx.workflow_inputs.get(name).cloned().into_iter().collect()
+            }
             InputBinding::NodeOutput { node, output } => states
                 .get(node)
                 .and_then(|s| s.outputs.get(output))

@@ -118,7 +118,11 @@ pub struct Quantity {
 
 impl Quantity {
     pub fn new(dimension: Dimension, value: f64) -> Self {
-        Self { value, dimension, unit: dimension.canonical_unit() }
+        Self {
+            value,
+            dimension,
+            unit: dimension.canonical_unit(),
+        }
     }
 
     /// Parse any accepted surface form into canonical units.
@@ -155,9 +159,10 @@ impl Quantity {
             .find(|c: char| c.is_alphabetic() || c == '/' || c == '°')
             .ok_or_else(|| M3FlowError::schema(format!("missing unit in quantity '{s}'")))?;
         let (num, unit) = s.split_at(split);
-        let value: f64 = num.trim().parse().map_err(|_| {
-            M3FlowError::schema(format!("invalid numeric part in quantity '{s}'"))
-        })?;
+        let value: f64 = num
+            .trim()
+            .parse()
+            .map_err(|_| M3FlowError::schema(format!("invalid numeric part in quantity '{s}'")))?;
         Self::convert(dim, value, unit.trim())
     }
 

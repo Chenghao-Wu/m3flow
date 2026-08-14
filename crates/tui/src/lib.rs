@@ -205,7 +205,9 @@ pub fn draw(
         None => (format!(" {}  (not found)", app.run_id), Color::Red),
     };
     f.render_widget(
-        Paragraph::new(title).block(Block::default().borders(Borders::ALL)).style(Style::default().fg(status_color)),
+        Paragraph::new(title)
+            .block(Block::default().borders(Borders::ALL))
+            .style(Style::default().fg(status_color)),
         chunks[0],
     );
 
@@ -311,11 +313,7 @@ fn detail_text(app: &App, task: Option<&m3flow_runtime::db::TaskRunRecord>) -> S
             s
         }
         Pane::Logs => {
-            let dir = app
-                .project
-                .runs_dir()
-                .join(&app.run_id)
-                .join(&t.node_id);
+            let dir = app.project.runs_dir().join(&app.run_id).join(&t.node_id);
             let mut s = String::new();
             if let Ok(resp) = std::fs::read_to_string(dir.join("response.json")) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp) {
@@ -366,7 +364,11 @@ fn detail_text(app: &App, task: Option<&m3flow_runtime::db::TaskRunRecord>) -> S
                     for e in edges {
                         let from = e["from"].as_str().unwrap_or("");
                         let to = e["to"].as_str().unwrap_or("");
-                        let mark = if to == t.node_id || from == t.node_id { " *" } else { "" };
+                        let mark = if to == t.node_id || from == t.node_id {
+                            " *"
+                        } else {
+                            ""
+                        };
                         s.push_str(&format!("{} -> {}{}\n", from, to, mark));
                     }
                 }

@@ -26,6 +26,7 @@ fn renders_without_panic() {
         params: serde_json::json!({}),
         outputs: None,
         error: None,
+        label: None,
     };
     let tr = TaskRunRecord {
         id: TaskRunId::new(),

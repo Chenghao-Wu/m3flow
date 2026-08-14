@@ -1,13 +1,15 @@
 schema: workflow/v1
 
 name: simple_equilibration
-version: 1.0.0
+version: 1.1.0
 
 description: >
   Minimal equilibration: minimize -> NVT -> NPT at the target state point,
   then the equilibration gate. Suitable for small-molecule liquids and as a
   quick path for well-behaved systems. Fails the run if the final state is
-  not scientifically equilibrated.
+  not scientifically equilibrated. NVT and NPT use the engine's native
+  linear ramps when temperature_start / pressure_start differ from the
+  target (e.g. pressure_start = 10 bar ramps down to pressure = 1 bar).
 
 kind: scientific_protocol
 domain: [molecule, atomistic, bulk]
@@ -26,19 +28,24 @@ inputs:
 
 parameters:
   temperature: {type: temperature, default: 300 K}
+  temperature_start: {type: temperature, default: 300 K,
+                      description: NVT starting temperature; ramps linearly to temperature.}
+  pressure_start: {type: pressure, default: 1 bar,
+                   description: NPT starting pressure; ramps linearly to pressure.}
   pressure: {type: pressure, default: 1 bar}
-  nvt_duration: {type: time, default: 50 ps}
-  npt_duration: {type: time, default: 100 ps}
+  nvt_duration: {type: time, default: 10 ps}
+  npt_duration: {type: time, default: 500 ps}
   timestep: {type: time, default: 1 fs}
   seed: {type: integer, default: 12345}
 
 stages:
   - {ensemble: minimize, name: minimize, duration: 5 ps, timestep: 0.5 fs}
   - {ensemble: nvt, name: nvt,
-     temperature: "${params.temperature}", duration: "${params.nvt_duration}",
-     timestep: "${params.timestep}"}
+     temperature: "${params.temperature_start}", temperature_end: "${params.temperature}",
+     duration: "${params.nvt_duration}", timestep: "${params.timestep}"}
   - {ensemble: npt, name: npt,
-     temperature: "${params.temperature}", pressure: "${params.pressure}",
+     temperature: "${params.temperature}",
+     pressure: "${params.pressure_start}", pressure_end: "${params.pressure}",
      duration: "${params.npt_duration}", timestep: "${params.timestep}"}
 
 steps:

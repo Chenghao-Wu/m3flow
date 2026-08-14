@@ -1,7 +1,7 @@
 schema: task/v1
 
 name: run_npt
-version: 1.0.0
+version: 1.1.0
 
 description: Run molecular dynamics in the isothermal-isobaric (NPT) ensemble.
 
@@ -51,6 +51,40 @@ parameters:
   temperature_end:
     type: temperature
     description: If set, ramp temperature linearly from temperature to this value.
+  pressure_end:
+    type: pressure
+    description: If set, ramp pressure linearly from pressure to this value.
+  pressure_style:
+    type: enum
+    values: [iso, aniso, tri, xyz]
+    default: iso
+    description: >
+      Barostat keyword style (LAMMPS fix nh): iso = isotropic, aniso =
+      independent x/y/z at the same target, tri = aniso + box tilt,
+      xyz = individual per-axis control (uses pressure_x/y/z).
+  couple:
+    type: enum
+    values: [xyz, xy, xz, yz, none]
+    default: xyz
+    description: Axis coupling; only valid with pressure_style = xyz.
+  pressure_x:
+    type: pressure
+    description: x-axis target (pressure_style = xyz); unset axes are not barostated.
+  pressure_x_end:
+    type: pressure
+    description: If set, ramp the x-axis pressure to this value.
+  pressure_y:
+    type: pressure
+    description: y-axis target (pressure_style = xyz).
+  pressure_y_end:
+    type: pressure
+    description: If set, ramp the y-axis pressure to this value.
+  pressure_z:
+    type: pressure
+    description: z-axis target (pressure_style = xyz).
+  pressure_z_end:
+    type: pressure
+    description: If set, ramp the z-axis pressure to this value.
   sampling_interval:
     type: time
     default: 1 ps

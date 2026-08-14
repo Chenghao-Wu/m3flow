@@ -48,6 +48,16 @@ impl Store {
             }
             std::fs::write(&dest, bytes)
                 .map_err(|e| M3FlowError::io(e, format!("writing {}", dest.display())))?;
+            // CAS blobs are immutable: read-only from birth. This is what
+            // makes symlinks in the friendly `results/` trees safe — a
+            // write through a link fails instead of silently poisoning a
+            // hash-named blob. Best-effort: odd filesystems must not fail
+            // registration.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o444));
+            }
         }
         Ok((rel, sha, bytes.len() as u64))
     }

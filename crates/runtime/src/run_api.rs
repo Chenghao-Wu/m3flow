@@ -26,8 +26,38 @@ pub struct RunOptions {
     pub inputs: BTreeMap<String, InputSource>,
     pub params: serde_json::Map<String, serde_json::Value>,
     pub no_cache: bool,
+    /// Disable the friendly results/ tree for this run (overrides the
+    /// project default; presentation-only, never part of any fingerprint).
+    pub no_materialize: bool,
+    /// Study/group folder for the friendly results/ tree.
+    /// Presentation-only: never part of spec_hash, cache keys, or artifact
+    /// identity. `None` → the tree groups by workflow name.
+    pub label: Option<String>,
     pub max_concurrency: Option<usize>,
     pub progress: Option<Box<dyn Fn(&str) + Send>>,
+}
+
+/// A label becomes a folder name in the friendly results/ tree, so it is
+/// validated eagerly rather than sanitized silently: first char
+/// `[A-Za-z0-9]`, the rest `[A-Za-z0-9._-]`, max 64 chars. Two different
+/// studies must never sanitize-merge into one folder.
+pub fn validate_label(label: &str) -> Result<String> {
+    let ok = !label.is_empty()
+        && label.len() <= 64
+        && label
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if ok {
+        Ok(label.to_string())
+    } else {
+        Err(M3FlowError::schema(format!(
+            "invalid run label '{label}': use 1-64 chars from [A-Za-z0-9._-], starting with a letter or digit"
+        )))
+    }
 }
 
 // ------------------------------------------------------------------ context
@@ -69,6 +99,7 @@ pub fn run_workflow(
     let compiled = Compiler::new(&registry).compile(&spec, &opts.params)?;
 
     let workflow_inputs = bind_inputs(&compiled, &opts.inputs, &db, &store)?;
+    let label = opts.label.as_deref().map(validate_label).transpose()?;
 
     let run = WorkflowRunRecord {
         id: WorkflowRunId::new(),
@@ -79,10 +110,7 @@ pub fn run_workflow(
         created_at: now_rfc3339(),
         started_at: None,
         ended_at: None,
-        workdir: project
-            .runs_dir()
-            .display()
-            .to_string(),
+        workdir: project.runs_dir().display().to_string(),
         git: Some(crate::project::git_context(&project.root)),
         inputs: serde_json::to_value(
             workflow_inputs
@@ -94,14 +122,18 @@ pub fn run_workflow(
         params: compiled.params.clone(),
         outputs: None,
         error: None,
+        label,
     };
     std::fs::create_dir_all(project.runs_dir().join(run.id.as_str()))
         .map_err(|e| M3FlowError::io(e, "creating run dir"))?;
     db.insert_workflow_run(&run)?;
 
     let ctx = RunContext {
-        max_concurrency: opts.max_concurrency.unwrap_or_else(|| project.max_concurrency()),
+        max_concurrency: opts
+            .max_concurrency
+            .unwrap_or_else(|| project.max_concurrency()),
         no_cache: opts.no_cache,
+        materialize: project.materialize_enabled() && !opts.no_materialize,
         progress: opts.progress,
         resume: BTreeMap::new(),
         project: project.clone(),
@@ -238,6 +270,7 @@ fn resume_impl(
     let ctx = RunContext {
         max_concurrency: project.max_concurrency(),
         no_cache: false,
+        materialize: project.materialize_enabled(),
         progress,
         resume,
         project: project.clone(),
@@ -292,7 +325,10 @@ fn unique_node(compiled: &CompiledWorkflow, prefix: &str) -> Result<String> {
         ))),
         1 => Ok(matches[0].to_string()),
         _ => Err(M3FlowError::workflow(
-            format!("step prefix '{prefix}' is ambiguous: {}", matches.join(", ")),
+            format!(
+                "step prefix '{prefix}' is ambiguous: {}",
+                matches.join(", ")
+            ),
             None,
         )),
     }
@@ -366,7 +402,10 @@ fn register_input_file(
     decl_type: &str,
 ) -> Result<ArtifactId> {
     if !path.is_file() {
-        return Err(M3FlowError::not_found(format!("input file '{}'", path.display())));
+        return Err(M3FlowError::not_found(format!(
+            "input file '{}'",
+            path.display()
+        )));
     }
     if m3flow_core::atypes::is_subtype(decl_type, "Spec") {
         let text = std::fs::read_to_string(path)
@@ -442,10 +481,166 @@ pub fn run_json(project: &Project, run_id: &str) -> Result<serde_json::Value> {
     }))
 }
 
+/// Composite one-call run status (`m3flow run status <wr>`): brief run
+/// record + per-step status/outputs + extracted failure + the suggested
+/// next command + the results/ dir. Answers "did it fail, where, and
+/// what now?" in a single call — the inspect + logs + graph loop's
+/// agent-oriented replacement.
+pub fn run_status_json(project: &Project, run_id: &str) -> Result<serde_json::Value> {
+    let db = open_db(project)?;
+    let rec = db.get_workflow_run(run_id)?;
+    let mut tasks = db.task_runs_of(rec.id.as_str())?;
+    tasks.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    let mut steps = Vec::new();
+    let mut failure = serde_json::Value::Null;
+    for tr in &tasks {
+        let outputs: serde_json::Map<String, serde_json::Value> = db
+            .outputs_of(tr.id.as_str())?
+            .into_iter()
+            .map(|(role, aid)| (role, aid.into()))
+            .collect();
+        steps.push(serde_json::json!({
+            "node": tr.node_id,
+            "task": format!("{}@{}", tr.task_name, tr.task_version),
+            "status": tr.status.as_str(),
+            "attempts": tr.attempts,
+            "outputs": outputs,
+        }));
+        if failure.is_null() && matches!(tr.status, TaskStatus::Failed) {
+            failure = failure_json(Some(tr.node_id.as_str()), tr.error.as_ref());
+        }
+    }
+    // Run-level failure with no failing task (scheduler crash, cancel race)
+    if failure.is_null() && matches!(rec.status, RunStatus::Failed) {
+        failure = failure_json(None, rec.error.as_ref());
+    }
+
+    let dir = crate::materialize::run_dir(&project.root, &rec);
+    Ok(serde_json::json!({
+        "run": {
+            "id": rec.id.to_string(),
+            "workflow": format!("{}@{}", rec.name, rec.version),
+            "label": rec.label,
+            "status": rec.status.as_str(),
+            "created_at": rec.created_at,
+            "started_at": rec.started_at,
+            "ended_at": rec.ended_at,
+        },
+        "results_dir": dir.display().to_string(),
+        "materialized": dir.is_dir(),
+        "steps": steps,
+        "failure": failure,
+        "next": next_command(&rec, &failure),
+    }))
+}
+
+/// Pull {step, category, recoverable, message} out of a stored error blob.
+/// Task errors land as flat objects ("category"/"recoverable"/"message")
+/// from the scheduler's OutcomeKind::Failed; run-level errors may be plain
+/// strings (finalize_on_error) or serialized M3FlowError objects.
+fn failure_json(step: Option<&str>, error: Option<&serde_json::Value>) -> serde_json::Value {
+    let Some(err) = error else {
+        return match step {
+            Some(s) => serde_json::json!({"step": s, "message": "failed without recorded error"}),
+            None => {
+                serde_json::json!({"step": null, "message": "run failed without recorded error"})
+            }
+        };
+    };
+    if let Some(msg) = err.as_str() {
+        return serde_json::json!({"step": step, "message": msg});
+    }
+    serde_json::json!({
+        "step": step,
+        "category": err.get("category").cloned().unwrap_or(serde_json::Value::Null),
+        "recoverable": err.get("recoverable").and_then(|v| v.as_bool()).unwrap_or(false),
+        "message": err.get("message").cloned().unwrap_or_else(|| err.clone()),
+    })
+}
+
+/// The single most useful follow-up command for the agent, or null when
+/// there is nothing to do. Retry for recoverable step failures, logs for
+/// permanent ones, resume for cancelled runs; never a destructive action.
+fn next_command(rec: &WorkflowRunRecord, failure: &serde_json::Value) -> Option<String> {
+    match rec.status {
+        RunStatus::Failed => {
+            let step = failure.get("step").and_then(|s| s.as_str());
+            let recoverable = failure
+                .get("recoverable")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            match (step, recoverable) {
+                (Some(s), true) => Some(format!("m3flow run retry {} {s}", rec.id)),
+                (Some(s), false) => Some(format!("m3flow run logs {} --step {s}", rec.id)),
+                (None, _) => None,
+            }
+        }
+        RunStatus::Cancelled => Some(format!("m3flow run resume {}", rec.id)),
+        _ => None,
+    }
+}
+
 pub fn list_runs_json(project: &Project, limit: usize) -> Result<serde_json::Value> {
     let db = open_db(project)?;
     let runs = db.list_workflow_runs(limit)?;
     Ok(serde_json::json!({"runs": runs}))
+}
+
+/// Rebuild the friendly results/ tree(s) from the provenance DB
+/// (`m3flow results sync [--run wr_…]`). The trees are pure derivatives:
+/// wiping and re-deriving them can never lose information.
+pub fn results_sync(project: &Project, run_id: Option<&str>) -> Result<serde_json::Value> {
+    let db = open_db(project)?;
+    let store = open_store(project)?;
+    let rebuilt = match run_id {
+        Some(id) => {
+            vec![crate::materialize::sync_run(project, &db, &store, id)?
+                .display()
+                .to_string()]
+        }
+        None => crate::materialize::sync_all(project, &db, &store)?,
+    };
+    Ok(serde_json::json!({"rebuilt": rebuilt}))
+}
+
+/// Set or clear a run's study label (`m3flow runs label <wr_id> [name]`).
+/// Pure metadata update — fingerprints, cache keys, and statuses are
+/// untouched. If the run has a materialized tree, it is moved to the new
+/// group folder (remove + re-derive; never hand-`mv`, the DB is truth).
+pub fn label_run(
+    project: &Project,
+    run_id: &str,
+    label: Option<&str>,
+) -> Result<serde_json::Value> {
+    let label = label.map(validate_label).transpose()?;
+    let db = open_db(project)?;
+    let before = db.get_workflow_run(run_id)?;
+    let old_dir = crate::materialize::run_dir(&project.root, &before);
+
+    db.set_workflow_run_label(run_id, label.as_deref())?;
+
+    let mut moved = serde_json::Value::Null;
+    if old_dir.is_dir() {
+        let store = open_store(project)?;
+        std::fs::remove_dir_all(&old_dir)
+            .map_err(|e| M3FlowError::io(e, format!("removing {}", old_dir.display())))?;
+        // Drop the old group folder if this was its last run (fails
+        // harmlessly when siblings remain).
+        if let Some(parent) = old_dir.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+        let new_dir = crate::materialize::sync_run(project, &db, &store, run_id)?;
+        moved = serde_json::json!({
+            "from": old_dir.display().to_string(),
+            "to": new_dir.display().to_string(),
+        });
+    }
+    Ok(serde_json::json!({
+        "run": run_id,
+        "label": label,
+        "moved": moved,
+    }))
 }
 
 /// Graph of a run: nodes + dependency edges + live statuses.
@@ -524,15 +719,14 @@ pub fn artifact_json(project: &Project, artifact_id: &str) -> Result<serde_json:
         );
     }
     let producer = match &a.producer {
-        Some(tr) => db
-            .task_run_by_id(tr.as_str())
-            .ok()
-            .map(|t| serde_json::json!({
+        Some(tr) => db.task_run_by_id(tr.as_str()).ok().map(|t| {
+            serde_json::json!({
                 "task_run_id": t.id.as_str(),
                 "workflow_run_id": t.workflow_run_id.as_str(),
                 "node_id": t.node_id,
                 "task": format!("{}@{}", t.task_name, t.task_version),
-            })),
+            })
+        }),
         None => None,
     };
     Ok(serde_json::json!({
@@ -674,4 +868,196 @@ pub fn cache_clear(project: &Project) -> Result<usize> {
         .execute("DELETE FROM cache_entry", [])
         .map_err(|e| M3FlowError::internal(format!("cache clear: {e}")))?;
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_label;
+
+    #[test]
+    fn label_charset_is_folder_safe() {
+        assert!(validate_label("peo-5k-screen").is_ok());
+        assert!(validate_label("study_01.v2").is_ok());
+        assert!(validate_label("A").is_ok());
+    }
+
+    #[test]
+    fn label_rejects_hostile_input() {
+        // path separators, spaces, leading dot, dot-dots, empty, overlong —
+        // anything that could escape or merge folders in results/
+        for bad in [
+            "",
+            "a/b",
+            "a\\b",
+            "a b",
+            ".hidden",
+            "..",
+            "a..b/..",
+            "émile",
+            &"x".repeat(65),
+        ] {
+            assert!(validate_label(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use crate::db::TaskRunRecord;
+    use m3flow_core::artifact::{RunStatus, TaskStatus};
+    use m3flow_core::id::TaskRunId;
+
+    fn tmp_project(tag: &str) -> Project {
+        let dir = std::env::temp_dir().join(format!("m3status-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("m3flow.yaml"), "schema: m3flow-project/v1\n").unwrap();
+        Project::load(dir).unwrap()
+    }
+
+    fn run_rec(status: RunStatus, error: Option<serde_json::Value>) -> WorkflowRunRecord {
+        WorkflowRunRecord {
+            id: WorkflowRunId::new(),
+            name: "construct_system".into(),
+            version: "1.0.0".into(),
+            spec_hash: "x".into(),
+            status,
+            created_at: "2026-08-14T09:00:00.000Z".into(),
+            started_at: None,
+            ended_at: None,
+            workdir: String::new(),
+            git: None,
+            inputs: serde_json::json!({}),
+            params: serde_json::json!({}),
+            outputs: None,
+            error,
+            label: Some("peo-5k-screen".into()),
+        }
+    }
+
+    fn task(
+        rec: &WorkflowRunRecord,
+        node: &str,
+        order: usize,
+        status: TaskStatus,
+        error: Option<serde_json::Value>,
+    ) -> TaskRunRecord {
+        TaskRunRecord {
+            id: TaskRunId::new(),
+            workflow_run_id: rec.id.clone(),
+            node_id: node.into(),
+            task_name: "build_system".into(),
+            task_version: "1.0.0".into(),
+            provider: Some("autopoly".into()),
+            status,
+            cache_key: None,
+            attempts: 2,
+            created_at: format!("2026-08-14T09:0{order}:00.000Z"),
+            started_at: None,
+            ended_at: None,
+            params: serde_json::json!({}),
+            error,
+            validation: None,
+            engine: None,
+        }
+    }
+
+    #[test]
+    fn status_extracts_failure_and_suggests_retry() {
+        let project = tmp_project("failed");
+        let db = open_db(&project).unwrap();
+        let rec = run_rec(RunStatus::Failed, None);
+        db.insert_workflow_run(&rec).unwrap();
+        let ok = task(&rec, "build", 1, TaskStatus::Completed, None);
+        let bad = task(
+            &rec,
+            "pack",
+            2,
+            TaskStatus::Failed,
+            Some(serde_json::json!({
+                "category": "provider_error", "recoverable": true, "message": "lammps exited 1"
+            })),
+        );
+        let waiting = task(&rec, "equilibrate", 3, TaskStatus::Pending, None);
+        for t in [&ok, &bad, &waiting] {
+            db.upsert_task_run(t).unwrap();
+        }
+        db.conn()
+            .execute(
+                "INSERT INTO artifact (id, type, schema_version, content_hash, producer, created_at, metadata_json)
+                 VALUES ('art_00112233', 'LammpsData', '1.0', 'h', NULL, '2026-08-14T09:00:00Z', '{}')",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO artifact_output (task_run_id, output_name, artifact_id) VALUES (?1, 'system', 'art_00112233')",
+                rusqlite::params![ok.id.as_str()],
+            )
+            .unwrap();
+
+        let v = run_status_json(&project, rec.id.as_str()).unwrap();
+        assert_eq!(v["run"]["status"], "FAILED");
+        assert_eq!(v["run"]["label"], "peo-5k-screen");
+        assert_eq!(v["steps"].as_array().unwrap().len(), 3);
+        // dispatch order, not insertion order
+        assert_eq!(v["steps"][0]["node"], "build");
+        assert_eq!(v["steps"][0]["outputs"]["system"], "art_00112233");
+        assert_eq!(v["failure"]["step"], "pack");
+        assert_eq!(v["failure"]["category"], "provider_error");
+        assert_eq!(v["failure"]["message"], "lammps exited 1");
+        assert_eq!(
+            v["next"].as_str().unwrap(),
+            format!("m3flow run retry {} pack", rec.id)
+        );
+        assert!(v["results_dir"].as_str().unwrap().contains("peo-5k-screen"));
+        let _ = std::fs::remove_dir_all(&project.root);
+    }
+
+    #[test]
+    fn permanent_failure_points_at_logs_not_retry() {
+        let project = tmp_project("permanent");
+        let db = open_db(&project).unwrap();
+        let rec = run_rec(RunStatus::Failed, None);
+        db.insert_workflow_run(&rec).unwrap();
+        let bad = task(
+            &rec,
+            "pack",
+            1,
+            TaskStatus::Failed,
+            Some(serde_json::json!({
+                "category": "scientific_validation", "recoverable": false,
+                "message": "scientific validation failed: charge_neutrality"
+            })),
+        );
+        db.upsert_task_run(&bad).unwrap();
+
+        let v = run_status_json(&project, rec.id.as_str()).unwrap();
+        assert_eq!(
+            v["next"].as_str().unwrap(),
+            format!("m3flow run logs {} --step pack", rec.id)
+        );
+        let _ = std::fs::remove_dir_all(&project.root);
+    }
+
+    #[test]
+    fn cancelled_run_suggests_resume_completed_suggests_nothing() {
+        let project = tmp_project("cancelled");
+        let db = open_db(&project).unwrap();
+        let cancelled = run_rec(RunStatus::Cancelled, None);
+        db.insert_workflow_run(&cancelled).unwrap();
+        let v = run_status_json(&project, cancelled.id.as_str()).unwrap();
+        assert_eq!(
+            v["next"].as_str().unwrap(),
+            format!("m3flow run resume {}", cancelled.id)
+        );
+        assert!(v["failure"].is_null());
+
+        let done = run_rec(RunStatus::Completed, None);
+        db.insert_workflow_run(&done).unwrap();
+        let v = run_status_json(&project, done.id.as_str()).unwrap();
+        assert!(v["next"].is_null());
+        let _ = std::fs::remove_dir_all(&project.root);
+    }
 }

@@ -243,6 +243,44 @@ def deck_minimize(ctx):
     return lines, False
 
 
+def _pressure_clause(ctx, pdamp_lmp):
+    """Barostat keyword clause for fix npt / fix press/berendsen.
+
+    iso|aniso|tri -> "{style} Pstart Pstop Pdamp" (Pstop = pressure_end or
+    Pstart). xyz -> per-axis "x Px0 Px1 Pdamp ..." clauses plus a trailing
+    "couple <mode>"; axes without a pressure_<axis> parameter are not
+    barostated (LAMMPS semantics).
+    """
+    p = ctx.params
+    style = p.get("pressure_style") or "iso"
+    couple = p.get("couple")
+    if style == "xyz":
+        parts = []
+        for axis in ("x", "y", "z"):
+            if ctx._q(f"pressure_{axis}") is None:
+                continue
+            a0 = ctx.pressure_atm(f"pressure_{axis}")
+            a1 = ctx.pressure_atm(f"pressure_{axis}_end", a0 / ATM_PER_BAR)
+            parts.append(f"{axis} {a0} {a1} {pdamp_lmp}")
+        if not parts:
+            raise ProviderFailure(
+                "input_invalid", "input_error",
+                "pressure_style 'xyz' requires at least one of "
+                "pressure_x/pressure_y/pressure_z")
+        return " ".join(parts) + f" couple {couple or 'xyz'}"
+    if couple and couple != "xyz":
+        raise ProviderFailure(
+            "input_invalid", "input_error",
+            "couple is only valid with pressure_style 'xyz'")
+    if any(ctx._q(f"pressure_{a}") is not None for a in "xyz"):
+        raise ProviderFailure(
+            "input_invalid", "input_error",
+            "pressure_x/y/z are only valid with pressure_style 'xyz'")
+    p0 = ctx.pressure_atm("pressure")
+    p1 = ctx.pressure_atm("pressure_end", p0 / ATM_PER_BAR)
+    return f"{style} {p0} {p1} {pdamp_lmp}"
+
+
 def deck_run(ctx, ensemble):
     p = ctx.params
     lines = _preamble(ctx)
@@ -273,6 +311,7 @@ def deck_run(ctx, ensemble):
                 lines.append(f"fix m3 all nvt temp {t0} {t1} {tdamp_lmp}")
         elif ensemble == "npt":
             bstat = p.get("barostat") or "nose_hoover"
+            pclause = _pressure_clause(ctx, pdamp_lmp)
             if tstat == "langevin" or bstat == "berendsen":
                 # mixed ensembles: langevin + press/berendsen
                 if tstat == "langevin":
@@ -281,13 +320,10 @@ def deck_run(ctx, ensemble):
                 else:
                     lines.append(f"fix m3 all nvt temp {t0} {t1} {tdamp_lmp}")
                 if bstat == "berendsen":
-                    lines.append(
-                        f"fix m3p all press/berendsen iso {ctx.pressure_atm()} "
-                        f"{ctx.pressure_atm()} {pdamp_lmp}")
+                    lines.append(f"fix m3p all press/berendsen {pclause}")
             else:
                 lines.append(
-                    f"fix m3 all npt temp {t0} {t1} {tdamp_lmp} "
-                    f"iso {ctx.pressure_atm()} {ctx.pressure_atm()} {pdamp_lmp}")
+                    f"fix m3 all npt temp {t0} {t1} {tdamp_lmp} {pclause}")
 
     extra_computes, extra_cols = _interaction_block(ctx)
     lines += _thermo_block(ctx, extra_cols=extra_cols, extra_computes=extra_computes)
@@ -368,15 +404,40 @@ def deck_deform(ctx):
 
 # ------------------------------------------------------------------ execution
 
+def _parallel_cmd(req, exe):
+    """Resolve launch command + env from declared resources / engine config.
+
+    Precedence: req["resources"]["cpu"] (per-task/step) > config["np"] > 1.
+    config["mpi"] == false selects OpenMP threading instead of MPI ranks.
+    """
+    resources = req.get("resources") or {}
+    cfg = req.get("config") or {}
+    try:
+        np_ = int(resources.get("cpu") or cfg.get("np") or 1)
+    except (TypeError, ValueError):
+        np_ = 1
+    np_ = max(1, np_)
+    base = [exe, "-in", "in.m3flow", "-log", "log.lammps", "-screen", "none"]
+    if np_ == 1:
+        return base, None, "serial"
+    if cfg.get("mpi") is False:
+        env = dict(os.environ, OMP_NUM_THREADS=str(np_))
+        return base + ["-sf", "omp"], env, f"openmp x{np_}"
+    launcher = shutil.which(cfg.get("launcher") or "mpirun")
+    if not launcher:
+        return base, None, f"serial (mpirun not found, requested np={np_})"
+    return [launcher, "-np", str(np_)] + base, None, f"mpi x{np_}"
+
+
 def _run_lammps(ctx, deck_lines, has_trajectory):
     deck_path = ctx.workdir / "in.m3flow"
     deck_path.write_text("\n".join(deck_lines) + "\n")
-    exe = _binary(ctx.req)
+    cmd, env, mode = _parallel_cmd(ctx.req, _binary(ctx.req))
     with open(ctx.workdir / "stdout.log", "w") as out:
-        proc = subprocess.run([exe, "-in", "in.m3flow", "-log", "log.lammps",
-                               "-screen", "none"],
-                              cwd=ctx.workdir, stdout=out, stderr=out,
-                              timeout=24 * 3600)
+        out.write(f"m3flow: launching LAMMPS ({mode}): {' '.join(cmd)}\n")
+        out.flush()
+        proc = subprocess.run(cmd, cwd=ctx.workdir, stdout=out, stderr=out,
+                              env=env, timeout=24 * 3600)
     log_path = ctx.workdir / "log.lammps"
     log_text = log_path.read_text(errors="replace") if log_path.is_file() else ""
     _classify_failure(proc.returncode, log_text)

@@ -182,7 +182,9 @@ fn lex(s: &str) -> Result<Vec<Tok>> {
             _ if c.is_ascii_digit() || c == '-' || c == '.' => {
                 let mut j = i;
                 let mut num = String::new();
-                while j < b.len() && (b[j].is_ascii_digit() || matches!(b[j], '.' | '-' | '+' | 'e' | 'E')) {
+                while j < b.len()
+                    && (b[j].is_ascii_digit() || matches!(b[j], '.' | '-' | '+' | 'e' | 'E'))
+                {
                     num.push(b[j]);
                     j += 1;
                 }
@@ -338,25 +340,34 @@ fn truthy(v: &serde_json::Value) -> bool {
     }
 }
 
-fn eval(node: &Node, resolve: &dyn Fn(&[String]) -> Option<serde_json::Value>) -> Result<serde_json::Value> {
+fn eval(
+    node: &Node,
+    resolve: &dyn Fn(&[String]) -> Option<serde_json::Value>,
+) -> Result<serde_json::Value> {
     Ok(match node {
         Node::Lit(v) => v.clone(),
         Node::Ref(p) => resolve(p).ok_or_else(|| {
-            M3FlowError::workflow(format!("cannot resolve ${{{}}} in condition", p.join(".")), None)
+            M3FlowError::workflow(
+                format!("cannot resolve ${{{}}} in condition", p.join(".")),
+                None,
+            )
         })?,
         Node::Not(n) => serde_json::Value::Bool(!truthy(&eval(n, resolve)?)),
-        Node::And(a, b) => serde_json::Value::Bool(
-            truthy(&eval(a, resolve)?) && truthy(&eval(b, resolve)?),
-        ),
-        Node::Or(a, b) => serde_json::Value::Bool(
-            truthy(&eval(a, resolve)?) || truthy(&eval(b, resolve)?),
-        ),
+        Node::And(a, b) => {
+            serde_json::Value::Bool(truthy(&eval(a, resolve)?) && truthy(&eval(b, resolve)?))
+        }
+        Node::Or(a, b) => {
+            serde_json::Value::Bool(truthy(&eval(a, resolve)?) || truthy(&eval(b, resolve)?))
+        }
         Node::Cmp(a, op, b) => {
             let l = eval(a, resolve)?;
             let r = eval(b, resolve)?;
             let res = match (&l, &r) {
-                                (serde_json::Value::Number(x), serde_json::Value::Number(y)) => {
-                    let (x, y) = (x.as_f64().unwrap_or(f64::NAN), y.as_f64().unwrap_or(f64::NAN));
+                (serde_json::Value::Number(x), serde_json::Value::Number(y)) => {
+                    let (x, y) = (
+                        x.as_f64().unwrap_or(f64::NAN),
+                        y.as_f64().unwrap_or(f64::NAN),
+                    );
                     match op {
                         CmpOp::Eq => x == y,
                         CmpOp::Ne => x != y,
@@ -434,8 +445,10 @@ mod tests {
     }
 
     fn ctx(pairs: &[(&str, serde_json::Value)]) -> impl Fn(&[String]) -> Option<serde_json::Value> {
-        let m: HashMap<String, serde_json::Value> =
-            pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+        let m: HashMap<String, serde_json::Value> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
         move |path: &[String]| m.get(&path.join(".")).cloned()
     }
 

@@ -132,7 +132,7 @@ def build_system(req):
             film.append(model)
 
     config = AutoPoly.GeometryConfig(
-        use_mc_chain_growth=bool(params.get("use_mc_chain_growth", False)),
+        use_mc_chain_growth=bool(params.get("use_mc_chain_growth", True)),
         rng_seed=seed if isinstance(seed, int) else None)
     builder = AutoPoly.GeometryBuilder(system, name, config)
     try:

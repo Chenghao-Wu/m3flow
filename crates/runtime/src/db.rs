@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS workflow_run (
     inputs_json TEXT NOT NULL,
     params_json TEXT NOT NULL,
     outputs_json TEXT,
-    error_json TEXT
+    error_json TEXT,
+    label TEXT
 );
 CREATE TABLE IF NOT EXISTS task_run (
     id TEXT PRIMARY KEY,
@@ -109,6 +110,10 @@ pub struct WorkflowRunRecord {
     pub params: serde_json::Value,
     pub outputs: Option<serde_json::Value>,
     pub error: Option<serde_json::Value>,
+    /// User-assigned study/group name for the friendly results/ tree.
+    /// Presentation-only: never part of spec hashes, cache keys, or
+    /// artifact identity. `None` → the tree groups by workflow name.
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -131,6 +136,25 @@ pub struct TaskRunRecord {
     pub engine: Option<serde_json::Value>,
 }
 
+/// Additive migrations for databases created by older binaries.
+/// `CREATE TABLE IF NOT EXISTS` never patches an existing table, so new
+/// columns land here, guarded by their own existence check.
+fn migrate(conn: &Connection) -> Result<()> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(workflow_run)")
+        .map_err(|e| M3FlowError::internal(format!("sqlite migrate probe: {e}")))?;
+    let columns: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| M3FlowError::internal(format!("sqlite migrate probe: {e}")))?
+        .flatten()
+        .collect();
+    if !columns.iter().any(|c| c == "label") {
+        conn.execute("ALTER TABLE workflow_run ADD COLUMN label TEXT", [])
+            .map_err(|e| M3FlowError::internal(format!("sqlite migrate (label): {e}")))?;
+    }
+    Ok(())
+}
+
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -141,6 +165,7 @@ impl Db {
             .map_err(|e| M3FlowError::internal(format!("sqlite open: {e}")))?;
         conn.execute_batch(SCHEMA)
             .map_err(|e| M3FlowError::internal(format!("sqlite schema: {e}")))?;
+        migrate(&conn)?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| M3FlowError::internal(format!("sqlite pragma: {e}")))?;
         Ok(Self { conn })
@@ -155,8 +180,8 @@ impl Db {
     pub fn insert_workflow_run(&self, r: &WorkflowRunRecord) -> Result<()> {
         self.conn.execute(
             "INSERT INTO workflow_run
-             (id,name,version,spec_hash,status,created_at,started_at,ended_at,workdir,git_json,inputs_json,params_json,outputs_json,error_json)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+             (id,name,version,spec_hash,status,created_at,started_at,ended_at,workdir,git_json,inputs_json,params_json,outputs_json,error_json,label)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 r.id.as_str(),
                 r.name,
@@ -172,31 +197,50 @@ impl Db {
                 r.params.to_string(),
                 r.outputs.as_ref().map(|o| o.to_string()),
                 r.error.as_ref().map(|e| e.to_string()),
+                r.label,
             ],
         ).map_err(|e| M3FlowError::internal(format!("insert workflow_run: {e}")))?;
         Ok(())
     }
 
     pub fn update_workflow_run(&self, r: &WorkflowRunRecord) -> Result<()> {
-        self.conn.execute(
-            "UPDATE workflow_run SET status=?2, started_at=?3, ended_at=?4,
+        self.conn
+            .execute(
+                "UPDATE workflow_run SET status=?2, started_at=?3, ended_at=?4,
              outputs_json=?5, error_json=?6 WHERE id=?1",
-            params![
-                r.id.as_str(),
-                r.status.as_str(),
-                r.started_at,
-                r.ended_at,
-                r.outputs.as_ref().map(|o| o.to_string()),
-                r.error.as_ref().map(|e| e.to_string()),
-            ],
-        ).map_err(|e| M3FlowError::internal(format!("update workflow_run: {e}")))?;
+                params![
+                    r.id.as_str(),
+                    r.status.as_str(),
+                    r.started_at,
+                    r.ended_at,
+                    r.outputs.as_ref().map(|o| o.to_string()),
+                    r.error.as_ref().map(|e| e.to_string()),
+                ],
+            )
+            .map_err(|e| M3FlowError::internal(format!("update workflow_run: {e}")))?;
+        Ok(())
+    }
+
+    /// Set/clear a run's study label. Pure metadata UPDATE — must never
+    /// touch status, outputs, or anything that feeds a fingerprint.
+    pub fn set_workflow_run_label(&self, id: &str, label: Option<&str>) -> Result<()> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE workflow_run SET label=?2 WHERE id=?1",
+                params![id, label],
+            )
+            .map_err(|e| M3FlowError::internal(format!("relabel workflow_run: {e}")))?;
+        if n == 0 {
+            return Err(M3FlowError::not_found(format!("workflow run '{id}'")));
+        }
         Ok(())
     }
 
     pub fn get_workflow_run(&self, id: &str) -> Result<WorkflowRunRecord> {
         self.conn
             .query_row(
-                "SELECT id,name,version,spec_hash,status,created_at,started_at,ended_at,workdir,git_json,inputs_json,params_json,outputs_json,error_json
+                "SELECT id,name,version,spec_hash,status,created_at,started_at,ended_at,workdir,git_json,inputs_json,params_json,outputs_json,error_json,label
                  FROM workflow_run WHERE id=?1",
                 params![id],
                 |row| {
@@ -225,6 +269,7 @@ impl Db {
                         error: row
                             .get::<_, Option<String>>(13)?
                             .and_then(|s| serde_json::from_str(&s).ok()),
+                        label: row.get(14)?,
                     })
                 },
             )
@@ -311,7 +356,11 @@ impl Db {
 
     // ------------------------------------------------------------ artifacts
 
-    pub fn insert_artifact(&self, a: &Artifact, file_rows: &[(String, String, String, u64)]) -> Result<()> {
+    pub fn insert_artifact(
+        &self,
+        a: &Artifact,
+        file_rows: &[(String, String, String, u64)],
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO artifact (id,type,schema_version,content_hash,producer,created_at,metadata_json,data_json)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -374,7 +423,9 @@ impl Db {
             .prepare("SELECT name, relpath FROM artifact_file WHERE artifact_id=?1")
             .map_err(|e| M3FlowError::internal(e.to_string()))?;
         let rows = stmt
-            .query_map(params![id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .query_map(params![id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|e| M3FlowError::internal(e.to_string()))?;
         let mut out = std::collections::BTreeMap::new();
         for r in rows {
@@ -389,7 +440,9 @@ impl Db {
             Some(t) => {
                 let mut stmt = self
                     .conn
-                    .prepare("SELECT id FROM artifact WHERE type=?1 ORDER BY created_at DESC LIMIT ?2")
+                    .prepare(
+                        "SELECT id FROM artifact WHERE type=?1 ORDER BY created_at DESC LIMIT ?2",
+                    )
                     .map_err(|e| M3FlowError::internal(e.to_string()))?;
                 let collected = stmt
                     .query_map(params![t, limit as i64], |r| r.get(0))
@@ -437,7 +490,9 @@ impl Db {
             .prepare("SELECT input_name, artifact_id FROM artifact_input WHERE task_run_id=?1")
             .map_err(|e| M3FlowError::internal(e.to_string()))?;
         let rows = stmt
-            .query_map(params![task_run], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .query_map(params![task_run], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
             .map_err(|e| M3FlowError::internal(e.to_string()))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| M3FlowError::internal(e.to_string()))
@@ -450,7 +505,9 @@ impl Db {
             .prepare("SELECT output_name, artifact_id FROM artifact_output WHERE task_run_id=?1")
             .map_err(|e| M3FlowError::internal(e.to_string()))?;
         let rows = stmt
-            .query_map(params![task_run], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .query_map(params![task_run], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
             .map_err(|e| M3FlowError::internal(e.to_string()))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| M3FlowError::internal(e.to_string()))
@@ -463,7 +520,9 @@ impl Db {
             .prepare("SELECT task_run_id, input_name FROM artifact_input WHERE artifact_id=?1")
             .map_err(|e| M3FlowError::internal(e.to_string()))?;
         let rows = stmt
-            .query_map(params![artifact], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .query_map(params![artifact], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
             .map_err(|e| M3FlowError::internal(e.to_string()))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| M3FlowError::internal(e.to_string()))
@@ -522,8 +581,7 @@ fn task_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRunRecord>
         created_at: row.get(9)?,
         started_at: row.get(10)?,
         ended_at: row.get(11)?,
-        params: serde_json::from_str(&row.get::<_, String>(12)?)
-            .unwrap_or(serde_json::Value::Null),
+        params: serde_json::from_str(&row.get::<_, String>(12)?).unwrap_or(serde_json::Value::Null),
         error: row
             .get::<_, Option<String>>(13)?
             .and_then(|s| serde_json::from_str(&s).ok()),
@@ -534,4 +592,106 @@ fn task_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRunRecord>
             .get::<_, Option<String>>(15)?
             .and_then(|s| serde_json::from_str(&s).ok()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_db(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("m3db-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("test.db")
+    }
+
+    fn rec(label: Option<&str>) -> WorkflowRunRecord {
+        WorkflowRunRecord {
+            id: WorkflowRunId::new(),
+            name: "construct_system".into(),
+            version: "1.0.0".into(),
+            spec_hash: "x".into(),
+            status: RunStatus::Pending,
+            created_at: "2026-08-14T09:00:00.000Z".into(),
+            started_at: None,
+            ended_at: None,
+            workdir: String::new(),
+            git: None,
+            inputs: serde_json::json!({}),
+            params: serde_json::json!({}),
+            outputs: None,
+            error: None,
+            label: label.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn label_roundtrip_and_relabel() {
+        let path = tmp_db("roundtrip");
+        let db = Db::open(&path).unwrap();
+        let r = rec(Some("peo-5k"));
+        db.insert_workflow_run(&r).unwrap();
+        assert_eq!(
+            db.get_workflow_run(r.id.as_str()).unwrap().label.as_deref(),
+            Some("peo-5k")
+        );
+        // status update must not clobber the label
+        db.update_workflow_run(&WorkflowRunRecord {
+            status: RunStatus::Running,
+            ..r.clone()
+        })
+        .unwrap();
+        assert_eq!(
+            db.get_workflow_run(r.id.as_str()).unwrap().label.as_deref(),
+            Some("peo-5k")
+        );
+        db.set_workflow_run_label(r.id.as_str(), Some("peo-10k"))
+            .unwrap();
+        assert_eq!(
+            db.get_workflow_run(r.id.as_str()).unwrap().label.as_deref(),
+            Some("peo-10k")
+        );
+        db.set_workflow_run_label(r.id.as_str(), None).unwrap();
+        assert_eq!(db.get_workflow_run(r.id.as_str()).unwrap().label, None);
+        assert!(db.set_workflow_run_label("wr_missing", None).is_err());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn pre_label_database_gains_the_column() {
+        let path = tmp_db("migrate");
+        // Simulate a DB written by a pre-label binary: full schema minus
+        // the label column.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE workflow_run (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, version TEXT NOT NULL,
+                spec_hash TEXT NOT NULL, status TEXT NOT NULL,
+                created_at TEXT NOT NULL, started_at TEXT, ended_at TEXT,
+                workdir TEXT NOT NULL, git_json TEXT,
+                inputs_json TEXT NOT NULL, params_json TEXT NOT NULL,
+                outputs_json TEXT, error_json TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workflow_run
+             (id,name,version,spec_hash,status,created_at,workdir,inputs_json,params_json)
+             VALUES ('wr_00000001','wf','1.0.0','h','COMPLETED','2026-01-01T00:00:00Z','','{}','{}')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Db::open(&path).unwrap();
+        // old row reads as unlabeled; new writes can carry a label
+        assert_eq!(db.get_workflow_run("wr_00000001").unwrap().label, None);
+        let r = rec(Some("study"));
+        db.insert_workflow_run(&r).unwrap();
+        assert_eq!(
+            db.get_workflow_run(r.id.as_str()).unwrap().label.as_deref(),
+            Some("study")
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 }

@@ -22,8 +22,8 @@ inputs:
 parameters:
   use_mc_chain_growth:
     type: boolean
-    default: false
-    description: Grow polymer chains with a self-avoiding random walk.
+    default: true
+    description: Grow polymer chains with a self-avoiding random walk (default on; set false for deterministic linear placement).
   seed:
     type: integer
     default: 12345

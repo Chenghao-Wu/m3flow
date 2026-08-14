@@ -88,7 +88,10 @@ impl Registry {
                 let p = entry?.path();
                 if p.is_dir() {
                     stack.push(p);
-                } else if matches!(p.extension().and_then(|e| e.to_str()), Some("yaml") | Some("yml")) {
+                } else if matches!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some("yaml") | Some("yml")
+                ) {
                     let text = std::fs::read_to_string(&p)
                         .map_err(|e| M3FlowError::io(e, format!("reading {}", p.display())))?;
                     self.load_text(&text, &p.display().to_string())?;
@@ -100,9 +103,8 @@ impl Registry {
 
     /// Validate + register one spec document (task or workflow, sniffed by `schema:`).
     pub fn load_text(&mut self, text: &str, origin: &str) -> Result<()> {
-        let json: serde_json::Value = serde_yaml::from_str(text).map_err(|e| {
-            M3FlowError::schema(format!("{origin}: YAML parse failed: {e}"))
-        })?;
+        let json: serde_json::Value = serde_yaml::from_str(text)
+            .map_err(|e| M3FlowError::schema(format!("{origin}: YAML parse failed: {e}")))?;
         let schema_tag = json
             .get("schema")
             .and_then(|s| s.as_str())
@@ -111,13 +113,15 @@ impl Registry {
             "task/v1" => {
                 validate_against("task", &json).map_err(|e| prefix_err(origin, e))?;
                 let spec = TaskSpec::from_json(&json).map_err(|e| prefix_err(origin, e))?;
-                self.check_task_types(&spec).map_err(|e| prefix_err(origin, e))?;
+                self.check_task_types(&spec)
+                    .map_err(|e| prefix_err(origin, e))?;
                 self.register_task(spec, origin);
             }
             "workflow/v1" => {
                 validate_against("workflow", &json).map_err(|e| prefix_err(origin, e))?;
                 let spec = WorkflowSpec::from_json(&json).map_err(|e| prefix_err(origin, e))?;
-                self.check_workflow_types(&spec).map_err(|e| prefix_err(origin, e))?;
+                self.check_workflow_types(&spec)
+                    .map_err(|e| prefix_err(origin, e))?;
                 self.register_workflow(spec, origin);
             }
             other => {
@@ -147,8 +151,7 @@ impl Registry {
     }
 
     fn register_task(&mut self, spec: TaskSpec, origin: &str) {
-        let version = Version::parse(&spec.version)
-            .unwrap_or_else(|_| Version::new(0, 0, 0));
+        let version = Version::parse(&spec.version).unwrap_or_else(|_| Version::new(0, 0, 0));
         self.origins
             .insert(format!("task:{}", spec.qualified()), origin.to_string());
         self.tasks
@@ -158,8 +161,7 @@ impl Registry {
     }
 
     fn register_workflow(&mut self, spec: WorkflowSpec, origin: &str) {
-        let version = Version::parse(&spec.version)
-            .unwrap_or_else(|_| Version::new(0, 0, 0));
+        let version = Version::parse(&spec.version).unwrap_or_else(|_| Version::new(0, 0, 0));
         self.origins
             .insert(format!("workflow:{}", spec.qualified()), origin.to_string());
         self.workflows
@@ -208,11 +210,17 @@ impl Registry {
     }
 
     pub fn task_versions(&self, name: &str) -> Vec<&Version> {
-        self.tasks.get(name).map(|vs| vs.keys().collect()).unwrap_or_default()
+        self.tasks
+            .get(name)
+            .map(|vs| vs.keys().collect())
+            .unwrap_or_default()
     }
 
     pub fn workflow_versions(&self, name: &str) -> Vec<&Version> {
-        self.workflows.get(name).map(|vs| vs.keys().collect()).unwrap_or_default()
+        self.workflows
+            .get(name)
+            .map(|vs| vs.keys().collect())
+            .unwrap_or_default()
     }
 
     pub fn origin_of(&self, qualified: &str) -> Option<&str> {

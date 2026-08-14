@@ -178,8 +178,82 @@ impl<'r> Compiler<'r> {
             if let Some(t1) = &stage.temperature_end {
                 parameters.insert("temperature_end".into(), t1.clone());
             }
+
+            // ---- barostat fields: npt stages only
+            let baro_used = stage.pressure_start.is_some()
+                || stage.pressure_end.is_some()
+                || stage.pressure_style.is_some()
+                || stage.couple.is_some()
+                || stage.pressure_x.is_some()
+                || stage.pressure_x_end.is_some()
+                || stage.pressure_y.is_some()
+                || stage.pressure_y_end.is_some()
+                || stage.pressure_z.is_some()
+                || stage.pressure_z_end.is_some();
+            if baro_used && stage.ensemble != "npt" {
+                return Err(M3FlowError::workflow(
+                    format!(
+                        "stage '{}': pressure ramp/style/couple/per-axis fields are only \
+                         valid on npt stages",
+                        step_id
+                    ),
+                    Some(step_id.clone()),
+                ));
+            }
+            let style = stage.pressure_style.as_deref();
+            if let Some(s) = style {
+                if !matches!(s, "iso" | "aniso" | "tri" | "xyz") {
+                    return Err(M3FlowError::workflow(
+                        format!("stage '{step_id}': pressure_style must be iso|aniso|tri|xyz"),
+                        Some(step_id.clone()),
+                    ));
+                }
+            }
+            if stage.couple.is_some() && style != Some("xyz") {
+                return Err(M3FlowError::workflow(
+                    format!("stage '{step_id}': couple requires pressure_style: xyz"),
+                    Some(step_id.clone()),
+                ));
+            }
+            let any_axis = stage.pressure_x.is_some()
+                || stage.pressure_y.is_some()
+                || stage.pressure_z.is_some();
+            if style == Some("xyz") && !any_axis {
+                return Err(M3FlowError::workflow(
+                    format!(
+                        "stage '{step_id}': pressure_style: xyz needs at least one of \
+                         pressure_x/pressure_y/pressure_z"
+                    ),
+                    Some(step_id.clone()),
+                ));
+            }
+
             if let Some(p) = &stage.pressure {
                 parameters.insert("pressure".into(), p.clone());
+            }
+            if let Some(p0) = &stage.pressure_start {
+                parameters.insert("pressure".into(), p0.clone());
+            }
+            if let Some(p1) = &stage.pressure_end {
+                parameters.insert("pressure_end".into(), p1.clone());
+            }
+            if let Some(s) = &stage.pressure_style {
+                parameters.insert("pressure_style".into(), s.clone().into());
+            }
+            if let Some(c) = &stage.couple {
+                parameters.insert("couple".into(), c.clone().into());
+            }
+            for (field, value) in [
+                ("pressure_x", &stage.pressure_x),
+                ("pressure_x_end", &stage.pressure_x_end),
+                ("pressure_y", &stage.pressure_y),
+                ("pressure_y_end", &stage.pressure_y_end),
+                ("pressure_z", &stage.pressure_z),
+                ("pressure_z_end", &stage.pressure_z_end),
+            ] {
+                if let Some(v) = value {
+                    parameters.insert(field.into(), v.clone());
+                }
             }
             if let Some(d) = &stage.duration {
                 // minimize reads its soft-relaxation length from relax_duration
@@ -243,14 +317,21 @@ impl<'r> Compiler<'r> {
             }
             for (i, item) in items.iter().enumerate() {
                 let expanded_id = format!("{step_id}__{i}");
-                let sub = StepSpec { foreach: None, loop_var: None, ..step.clone() };
+                let sub = StepSpec {
+                    foreach: None,
+                    loop_var: None,
+                    ..step.clone()
+                };
                 scope.loop_vars.insert(var.clone(), item.clone());
                 self.expand_step(&expanded_id, &sub, spec, scope, nodes, symbols)?;
                 scope.loop_vars.remove(&var);
             }
             // Collect view: ${step_id.<out>} gathers all expansions, in order.
             if let Some(task_ref) = &step.task {
-                let task = self.registry.task(task_ref).map_err(|e| with_step(e, step_id))?;
+                let task = self
+                    .registry
+                    .task(task_ref)
+                    .map_err(|e| with_step(e, step_id))?;
                 for (out, decl) in &task.outputs {
                     symbols.insert(
                         format!("{step_id}.{out}"),
@@ -284,9 +365,15 @@ impl<'r> Compiler<'r> {
 
         // ---- plain task step
         let task_ref = step.task.clone().ok_or_else(|| {
-            M3FlowError::workflow("step needs 'task' or 'workflow'".to_string(), Some(step_id.to_string()))
+            M3FlowError::workflow(
+                "step needs 'task' or 'workflow'".to_string(),
+                Some(step_id.to_string()),
+            )
         })?;
-        let task = self.registry.task(&task_ref).map_err(|e| with_step(e, step_id))?;
+        let task = self
+            .registry
+            .task(&task_ref)
+            .map_err(|e| with_step(e, step_id))?;
         let node_id = format!("{}{}", scope.prefix, step_id);
 
         let mut inputs = BTreeMap::new();
@@ -385,7 +472,10 @@ impl<'r> Compiler<'r> {
             params,
             deps: deps.into_iter().collect(),
             condition: step.condition.clone(),
-            retry: step.retry.clone().unwrap_or(RetrySpec { max_attempts: 1, on: vec![] }),
+            retry: step.retry.clone().unwrap_or(RetrySpec {
+                max_attempts: 1,
+                on: vec![],
+            }),
             resources: step.resources.clone().or_else(|| task.resources.clone()),
             declared_outputs: declared_outputs.clone(),
             label,
@@ -425,7 +515,10 @@ impl<'r> Compiler<'r> {
         nodes: &mut Vec<IrNode>,
         symbols: &mut BTreeMap<String, OutputBinding>,
     ) -> Result<()> {
-        let child = self.registry.workflow(wf_ref).map_err(|e| with_step(e, step_id))?;
+        let child = self
+            .registry
+            .workflow(wf_ref)
+            .map_err(|e| with_step(e, step_id))?;
 
         let mut overrides = serde_json::Map::new();
         for (k, v) in &step.parameters {
@@ -450,7 +543,10 @@ impl<'r> Compiler<'r> {
             }
             child_seed.insert(
                 format!("inputs.{iname}"),
-                OutputBinding { binding, artifact_type: have },
+                OutputBinding {
+                    binding,
+                    artifact_type: have,
+                },
             );
         }
 
@@ -471,7 +567,10 @@ impl<'r> Compiler<'r> {
         symbols.insert(
             step_id.to_string(),
             OutputBinding {
-                binding: InputBinding::NodeOutput { node: String::new(), output: String::new() },
+                binding: InputBinding::NodeOutput {
+                    node: String::new(),
+                    output: String::new(),
+                },
                 artifact_type: String::new(),
             },
         );
@@ -504,7 +603,10 @@ impl<'r> Compiler<'r> {
         let first = r.path[0].as_str();
         if first == "inputs" {
             let name = r.path.get(1).ok_or_else(|| {
-                M3FlowError::workflow("malformed inputs reference".to_string(), Some(step_id.to_string()))
+                M3FlowError::workflow(
+                    "malformed inputs reference".to_string(),
+                    Some(step_id.to_string()),
+                )
             })?;
             // Subworkflow scope: the input was seeded with the parent's
             // resolved binding — use it (carries the dependency edge).
@@ -599,11 +701,9 @@ impl<'r> Compiler<'r> {
                         if r.path.len() == 1 {
                             return item.clone();
                         }
-                        return r.path[1..]
-                            .iter()
-                            .fold(item.clone(), |acc, key| {
-                                acc.get(key).cloned().unwrap_or(serde_json::Value::Null)
-                            });
+                        return r.path[1..].iter().fold(item.clone(), |acc, key| {
+                            acc.get(key).cloned().unwrap_or(serde_json::Value::Null)
+                        });
                     }
                     if first == "params" {
                         return scope
@@ -832,7 +932,10 @@ fn topo_sort(nodes: Vec<IrNode>) -> Result<Vec<IrNode>> {
             None,
         ));
     }
-    Ok(sorted.into_iter().map(|id| by_id.remove(&id).unwrap()).collect())
+    Ok(sorted
+        .into_iter()
+        .map(|id| by_id.remove(&id).unwrap())
+        .collect())
 }
 
 fn node_label(task: &str, params: &BTreeMap<String, serde_json::Value>) -> String {

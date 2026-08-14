@@ -248,6 +248,33 @@
      "temperature_start": {},
      "temperature_end": {},
      "pressure": {},
+     "pressure_start": {},
+     "pressure_end": {},
+     "pressure_style": {
+      "type": "string",
+      "enum": [
+       "iso",
+       "aniso",
+       "tri",
+       "xyz"
+      ]
+     },
+     "couple": {
+      "type": "string",
+      "enum": [
+       "xyz",
+       "xy",
+       "xz",
+       "yz",
+       "none"
+      ]
+     },
+     "pressure_x": {},
+     "pressure_x_end": {},
+     "pressure_y": {},
+     "pressure_y_end": {},
+     "pressure_z": {},
+     "pressure_z_end": {},
      "duration": {},
      "timestep": {},
      "name": {

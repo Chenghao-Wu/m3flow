@@ -54,7 +54,11 @@ pub struct StagedArtifact {
 
 /// Compute the content fingerprint from type + per-file content hashes.
 /// Metadata is deliberately excluded: it is descriptive, not identity.
-pub fn content_hash(artifact_type: &str, schema_version: &str, file_hashes: &BTreeMap<String, String>) -> String {
+pub fn content_hash(
+    artifact_type: &str,
+    schema_version: &str,
+    file_hashes: &BTreeMap<String, String>,
+) -> String {
     canon::hash_json(&serde_json::json!({
         "type": artifact_type,
         "schema_version": schema_version,

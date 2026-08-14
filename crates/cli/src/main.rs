@@ -54,6 +54,9 @@ enum Cmd {
     /// Cache inspection and management.
     #[command(subcommand)]
     Cache(CacheCmd),
+    /// Friendly results/ trees (derived views over the store).
+    #[command(subcommand)]
+    Results(ResultsCmd),
     /// Interactive execution cockpit.
     Tui {
         /// Run id to focus (default: latest).
@@ -101,6 +104,13 @@ enum WfCmd {
         /// Bypass the result cache.
         #[arg(long)]
         no_cache: bool,
+        /// Do not materialize the friendly results/ tree for this run.
+        #[arg(long)]
+        no_materialize: bool,
+        /// Study/group folder for the run in results/ (e.g. peo-5k-screen;
+        /// [A-Za-z0-9._-], max 64 chars). Unlabeled runs group by workflow.
+        #[arg(long)]
+        label: Option<String>,
         /// Limit concurrent tasks.
         #[arg(long)]
         max_concurrency: Option<usize>,
@@ -117,6 +127,8 @@ enum RunCmd {
         #[arg(long, default_value = "20")]
         limit: usize,
     },
+    /// Composite one-call status: run + steps + failure + next command.
+    Status { id: String },
     /// Show run details incl. per-step status.
     Inspect { id: String },
     /// Show per-step logs (response documents, engine logs).
@@ -132,6 +144,12 @@ enum RunCmd {
     Resume { id: String },
     /// Re-execute one step and everything downstream of it.
     Retry { id: String, step: String },
+    /// Set or clear a run's study label (moves its results/ folder).
+    Label {
+        id: String,
+        /// New label ([A-Za-z0-9._-], max 64 chars); omit to clear.
+        name: Option<String>,
+    },
     /// Request cancellation of a running run.
     Cancel { id: String },
 }
@@ -191,6 +209,16 @@ enum CacheCmd {
     Clear,
 }
 
+#[derive(Subcommand)]
+enum ResultsCmd {
+    /// Rebuild friendly results/ tree(s) from the provenance DB.
+    Sync {
+        /// Rebuild only this run's tree (default: all runs).
+        #[arg(long)]
+        run: Option<String>,
+    },
+}
+
 // ------------------------------------------------------------------ parsing
 
 fn parse_kv(s: &str) -> std::result::Result<(String, serde_json::Value), String> {
@@ -207,9 +235,7 @@ fn parse_input(s: &str) -> std::result::Result<(String, InputSource), String> {
         .split_once('=')
         .ok_or_else(|| format!("expected name=art_xxx or name=@path, got '{s}'"))?;
     let src = if let Some(path) = v.strip_prefix('@') {
-        InputSource::File(PathBuf::from(
-            shellexpand::tilde(path).into_owned(),
-        ))
+        InputSource::File(PathBuf::from(shellexpand::tilde(path).into_owned()))
     } else if v.starts_with("art_") {
         InputSource::Artifact(v.to_string())
     } else {
@@ -224,7 +250,10 @@ fn parse_file_kv(s: &str) -> std::result::Result<(String, PathBuf), String> {
     let (k, v) = s
         .split_once('=')
         .ok_or_else(|| format!("expected name=path, got '{s}'"))?;
-    Ok((k.to_string(), PathBuf::from(shellexpand::tilde(v).into_owned())))
+    Ok((
+        k.to_string(),
+        PathBuf::from(shellexpand::tilde(v).into_owned()),
+    ))
 }
 
 // ------------------------------------------------------------------ helpers
@@ -247,9 +276,9 @@ fn emit_json(v: &serde_json::Value) {
 
 fn fail(e: M3FlowError, json: bool) -> ! {
     if json {
-        let v = serde_json::to_value(&e).unwrap_or_else(|_| {
-            serde_json::json!({"error_type": "internal", "message": e.to_string()})
-        });
+        let v = serde_json::to_value(&e).unwrap_or_else(
+            |_| serde_json::json!({"error_type": "internal", "message": e.to_string()}),
+        );
         let mut obj = v.as_object().cloned().unwrap_or_default();
         obj.insert("category".into(), e.category().into());
         obj.insert("recoverable".into(), e.recoverable().into());
@@ -286,6 +315,7 @@ fn dispatch(cmd: Cmd, json: bool) -> Result<i32> {
         Cmd::Task(c) => task_cmd(c, json),
         Cmd::Workflow(c) => wf_cmd(c, json),
         Cmd::Run(c) => run_cmd(c, json),
+        Cmd::Results(c) => results_cmd(c, json),
         Cmd::Artifact(c) => art_cmd(c, json),
         Cmd::Schema(c) => schema_cmd(c, json),
         Cmd::Provider(c) => prov_cmd(c, json),
@@ -327,7 +357,10 @@ fn task_cmd(c: TaskCmd, json: bool) -> Result<i32> {
                 let v: Vec<_> = tasks.iter().map(|t| task_json(t, &reg)).collect();
                 emit_json(&serde_json::json!({"tasks": v}));
             } else {
-                println!("{:<34} {:<10} {:<14} DESCRIPTION", "TASK", "VERSION", "CATEGORY");
+                println!(
+                    "{:<34} {:<10} {:<14} DESCRIPTION",
+                    "TASK", "VERSION", "CATEGORY"
+                );
                 for t in tasks {
                     let cat = serde_json::to_value(t.category)
                         .ok()
@@ -423,8 +456,7 @@ fn wf_cmd(c: WfCmd, json: bool) -> Result<i32> {
         }
         WfCmd::Plan { name, params } => {
             let p = project()?;
-            let compiled =
-                run_api::plan_workflow(&p, &name, &params.into_iter().collect())?;
+            let compiled = run_api::plan_workflow(&p, &name, &params.into_iter().collect())?;
             print_plan(&compiled, json);
         }
         WfCmd::Run {
@@ -432,6 +464,8 @@ fn wf_cmd(c: WfCmd, json: bool) -> Result<i32> {
             inputs,
             params,
             no_cache,
+            no_materialize,
+            label,
             max_concurrency,
             dry_run,
         } => {
@@ -454,6 +488,8 @@ fn wf_cmd(c: WfCmd, json: bool) -> Result<i32> {
                     inputs: inputs.into_iter().collect(),
                     params: params_map,
                     no_cache,
+                    no_materialize,
+                    label,
                     max_concurrency,
                     progress,
                 },
@@ -463,13 +499,17 @@ fn wf_cmd(c: WfCmd, json: bool) -> Result<i32> {
             } else {
                 println!(
                     "run {} finished: {} (workflow {}@{})",
-                    rec.id, rec.status.as_str(), rec.name, rec.version
+                    rec.id,
+                    rec.status.as_str(),
+                    rec.name,
+                    rec.version
                 );
                 if let Some(outputs) = &rec.outputs {
                     for (k, v) in outputs.as_object().into_iter().flatten() {
                         println!("  output {k}: {}", v.as_str().unwrap_or(&v.to_string()));
                     }
                 }
+                print_failures(&p, &rec);
             }
             return Ok(match rec.status {
                 m3flow_core::artifact::RunStatus::Completed => 0,
@@ -498,7 +538,18 @@ fn print_plan(compiled: &m3flow_runtime::ir::CompiledWorkflow, json: bool) {
         } else {
             format!("  (after {})", n.deps.join(", "))
         };
-        println!("  {:>3}. {:<28} {:<34}{}{}", i + 1, n.id, n.task, deps, if n.label.is_empty() { String::new() } else { format!("  [{}]", n.label) });
+        println!(
+            "  {:>3}. {:<28} {:<34}{}{}",
+            i + 1,
+            n.id,
+            n.task,
+            deps,
+            if n.label.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", n.label)
+            }
+        );
     }
 }
 
@@ -513,21 +564,79 @@ fn run_cmd(c: RunCmd, json: bool) -> Result<i32> {
                 emit_json(&v);
             } else {
                 println!(
-                    "{:<14} {:<36} {:<10} CREATED",
-                    "RUN", "WORKFLOW", "STATUS"
+                    "{:<14} {:<36} {:<22} {:<10} CREATED",
+                    "RUN", "WORKFLOW", "LABEL", "STATUS"
                 );
                 for r in v["runs"].as_array().into_iter().flatten() {
+                    let label = r["label"].as_str().unwrap_or("-");
+                    let label = if label.chars().count() > 20 {
+                        format!("{}…", label.chars().take(19).collect::<String>())
+                    } else {
+                        label.to_string()
+                    };
                     println!(
-                        "{:<14} {:<36} {:<10} {}",
+                        "{:<14} {:<36} {:<22} {:<10} {}",
                         r["id"].as_str().unwrap_or(""),
                         format!(
                             "{}@{}",
                             r["name"].as_str().unwrap_or(""),
                             r["version"].as_str().unwrap_or("")
                         ),
+                        label,
                         r["status"].as_str().unwrap_or(""),
                         r["created_at"].as_str().unwrap_or("")
                     );
+                }
+            }
+        }
+        RunCmd::Status { id } => {
+            let v = run_api::run_status_json(&p, &id)?;
+            if json {
+                emit_json(&v);
+            } else {
+                let r = &v["run"];
+                let label = r["label"]
+                    .as_str()
+                    .map(|l| format!("  [{l}]"))
+                    .unwrap_or_default();
+                println!(
+                    "run {} — {} — {}{}",
+                    r["id"].as_str().unwrap_or(""),
+                    r["workflow"].as_str().unwrap_or(""),
+                    r["status"].as_str().unwrap_or(""),
+                    label
+                );
+                println!(
+                    "{:<30} {:<10} {:<8} OUTPUTS",
+                    "STEP", "STATUS", "ATTEMPTS"
+                );
+                for s in v["steps"].as_array().into_iter().flatten() {
+                    let outs = s["outputs"].as_object().map(|o| o.len()).unwrap_or(0);
+                    println!(
+                        "{:<30} {:<10} {:<8} {}",
+                        s["node"].as_str().unwrap_or(""),
+                        s["status"].as_str().unwrap_or(""),
+                        s["attempts"].as_i64().unwrap_or(0),
+                        if outs == 0 {
+                            "-".into()
+                        } else {
+                            format!("{outs} artifact(s)")
+                        }
+                    );
+                }
+                if let Some(f) = v["failure"].as_object() {
+                    println!(
+                        "failure: step {} — {} — {}",
+                        f["step"].as_str().unwrap_or("<run>"),
+                        f["category"].as_str().unwrap_or("unknown"),
+                        f["message"].as_str().unwrap_or("")
+                    );
+                }
+                if let Some(next) = v["next"].as_str() {
+                    println!("next: {next}");
+                }
+                if v["materialized"].as_bool() == Some(true) {
+                    println!("results: {}", v["results_dir"].as_str().unwrap_or(""));
                 }
             }
         }
@@ -554,6 +663,20 @@ fn run_cmd(c: RunCmd, json: bool) -> Result<i32> {
                         t["task_name"].as_str().unwrap_or(""),
                         t["task_version"].as_str().unwrap_or("")
                     );
+                    // A FAILED row without its reason sends the user digging
+                    // through workdirs; the error JSON is already on the row.
+                    if t["status"].as_str() == Some("FAILED") {
+                        let msg = t["error"]
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("no message recorded");
+                        println!("   error: {msg}");
+                        if let Some(d) = t["error"].get("details") {
+                            if !d.is_null() {
+                                println!("   details: {d}");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -565,7 +688,11 @@ fn run_cmd(c: RunCmd, json: bool) -> Result<i32> {
             if json {
                 emit_json(&v);
             } else {
-                println!("run {} — {}", v["run"], v["workflow"].as_str().unwrap_or(""));
+                println!(
+                    "run {} — {}",
+                    v["run"],
+                    v["workflow"].as_str().unwrap_or("")
+                );
                 for n in v["nodes"].as_array().into_iter().flatten() {
                     println!(
                         "  {:<30} {:<10} {}",
@@ -587,12 +714,30 @@ fn run_cmd(c: RunCmd, json: bool) -> Result<i32> {
         RunCmd::Resume { id } => {
             let progress = progress_cb(json);
             let rec = run_api::resume_run(&p, &id, progress)?;
-            return finish_run(rec, json);
+            return finish_run(&p, rec, json);
         }
         RunCmd::Retry { id, step } => {
             let progress = progress_cb(json);
             let rec = run_api::retry_step(&p, &id, &step, progress)?;
-            return finish_run(rec, json);
+            return finish_run(&p, rec, json);
+        }
+        RunCmd::Label { id, name } => {
+            let v = run_api::label_run(&p, &id, name.as_deref())?;
+            if json {
+                emit_json(&v);
+            } else {
+                match v["label"].as_str() {
+                    Some(l) => println!("run {id} labeled '{l}'"),
+                    None => println!("run {id} label cleared"),
+                }
+                if let Some(m) = v["moved"].as_object() {
+                    println!(
+                        "  {} -> {}",
+                        m["from"].as_str().unwrap_or(""),
+                        m["to"].as_str().unwrap_or("")
+                    );
+                }
+            }
         }
         RunCmd::Cancel { id } => {
             run_api::cancel_run(&p, &id)?;
@@ -614,11 +759,12 @@ fn progress_cb(json: bool) -> Option<Box<dyn Fn(&str) + Send>> {
     }
 }
 
-fn finish_run(rec: m3flow_runtime::db::WorkflowRunRecord, json: bool) -> Result<i32> {
+fn finish_run(p: &Project, rec: m3flow_runtime::db::WorkflowRunRecord, json: bool) -> Result<i32> {
     if json {
         emit_json(&serde_json::to_value(&rec).unwrap_or_default());
     } else {
         println!("run {} finished: {}", rec.id, rec.status.as_str());
+        print_failures(p, &rec);
     }
     Ok(match rec.status {
         m3flow_core::artifact::RunStatus::Completed => 0,
@@ -627,10 +773,55 @@ fn finish_run(rec: m3flow_runtime::db::WorkflowRunRecord, json: bool) -> Result<
     })
 }
 
+/// Print why a run failed: each failed step's recorded error message plus
+/// provider-supplied details (e.g. gate checks/metrics). The provenance DB
+/// already stores all of this on the task_run row — surface it so a failure
+/// is actionable without digging through workdirs.
+fn print_failures(p: &Project, rec: &m3flow_runtime::db::WorkflowRunRecord) {
+    if !matches!(rec.status, m3flow_core::artifact::RunStatus::Failed) {
+        return;
+    }
+    if let Some(e) = &rec.error {
+        let msg = e
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| e.to_string());
+        if !msg.is_empty() {
+            println!("  run error: {msg}");
+        }
+    }
+    let Ok(db) = run_api::open_db(p) else { return };
+    let Ok(tasks) = db.task_runs_of(rec.id.as_str()) else {
+        return;
+    };
+    for t in tasks
+        .iter()
+        .filter(|t| matches!(t.status, m3flow_core::artifact::TaskStatus::Failed))
+    {
+        let msg = t
+            .error
+            .as_ref()
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("no message recorded");
+        println!(
+            "  failed: {} ({}@{}): {msg}",
+            t.node_id, t.task_name, t.task_version
+        );
+        if let Some(details) = t.error.as_ref().and_then(|e| e.get("details")) {
+            if !details.is_null() {
+                println!("          details: {details}");
+            }
+        }
+    }
+}
+
 fn logs_cmd(p: &Project, run_id: &str, step: Option<&str>, json: bool) -> Result<i32> {
     let run_dir = p.runs_dir().join(run_id);
     if !run_dir.is_dir() {
-        return Err(M3FlowError::not_found(format!("run directory for '{run_id}'")));
+        return Err(M3FlowError::not_found(format!(
+            "run directory for '{run_id}'"
+        )));
     }
     let mut steps: Vec<PathBuf> = std::fs::read_dir(&run_dir)?
         .filter_map(|e| e.ok())
@@ -721,7 +912,8 @@ fn art_cmd(c: ArtCmd, json: bool) -> Result<i32> {
                         "{:<16} {:<24} {:<16} {}",
                         a["id"].as_str().unwrap_or(""),
                         a["type"].as_str().unwrap_or(""),
-                        &a["content_hash"].as_str().unwrap_or("")[..12.min(a["content_hash"].as_str().unwrap_or("").len())],
+                        &a["content_hash"].as_str().unwrap_or("")
+                            [..12.min(a["content_hash"].as_str().unwrap_or("").len())],
                         a["created_at"].as_str().unwrap_or("")
                     );
                 }
@@ -856,12 +1048,19 @@ fn prov_cmd(c: ProvCmd, json: bool) -> Result<i32> {
             if json {
                 emit_json(&serde_json::json!({"providers": rows}));
             } else {
-                println!("{:<16} {:<10} {:<24} EXECUTABLE", "PROVIDER", "STATUS", "ENGINE");
+                println!(
+                    "{:<16} {:<10} {:<24} EXECUTABLE",
+                    "PROVIDER", "STATUS", "ENGINE"
+                );
                 for r in &rows {
                     println!(
                         "{:<16} {:<10} {:<24} {}",
                         r["name"].as_str().unwrap_or(""),
-                        if r["available"].as_bool().unwrap_or(false) { "ok" } else { "MISSING" },
+                        if r["available"].as_bool().unwrap_or(false) {
+                            "ok"
+                        } else {
+                            "MISSING"
+                        },
                         r["engine"].as_str().unwrap_or("-"),
                         r["executable"].as_str().unwrap_or("-")
                     );
@@ -905,6 +1104,25 @@ fn cache_cmd(c: CacheCmd, json: bool) -> Result<i32> {
                 emit_json(&serde_json::json!({"cleared": n}));
             } else {
                 println!("cleared {n} cache entries");
+            }
+        }
+    }
+    Ok(0)
+}
+
+fn results_cmd(c: ResultsCmd, json: bool) -> Result<i32> {
+    let p = project()?;
+    match c {
+        ResultsCmd::Sync { run } => {
+            let v = run_api::results_sync(&p, run.as_deref())?;
+            if json {
+                emit_json(&v);
+            } else {
+                let dirs = v["rebuilt"].as_array().cloned().unwrap_or_default();
+                println!("rebuilt {} results tree(s)", dirs.len());
+                for d in dirs {
+                    println!("  {}", d.as_str().unwrap_or_default());
+                }
             }
         }
     }
