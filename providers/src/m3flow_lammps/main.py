@@ -25,7 +25,7 @@ from pathlib import Path
 
 from m3flow_provider import (Provider, ProviderFailure, artifact, verdict)
 
-PROVIDER_VERSION = "0.3.1"
+PROVIDER_VERSION = "0.3.2"
 ATM_PER_BAR = 0.986923
 FS_PER_TAU = 1000.0  # lj-time convention for CG systems
 
@@ -325,6 +325,10 @@ def deck_run(ctx, ensemble):
                 lines.append(
                     f"fix m3 all npt temp {t0} {t1} {tdamp_lmp} {pclause}")
 
+    if ensemble in ("nvt", "npt"):
+        # remove net linear + angular momentum drift during equilibration
+        lines.append("fix m3mom all momentum 1000 linear 1 1 1 angular")
+
     extra_computes, extra_cols = _interaction_block(ctx)
     lines += _thermo_block(ctx, extra_cols=extra_cols, extra_computes=extra_computes)
     dump_lines, _ = _dump_block(ctx)
@@ -340,6 +344,8 @@ def deck_run(ctx, ensemble):
         lines += ["unfix m3", "unfix m3t"] + (["unfix m3p"] if "m3p" in " ".join(lines) else [])
     else:
         lines.append("unfix m3")
+    if ensemble in ("nvt", "npt"):
+        lines.append("unfix m3mom")
     lines += _finalize(ctx)
     return lines, True
 

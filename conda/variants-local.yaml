@@ -1,0 +1,8 @@
+# Local variant pinning so `${{ stdlib('c') }}` resolves outside conda-forge CI.
+# conda-forge's staged-recipes/feedstock CI injects equivalents automatically;
+# this file is only needed for local builds:
+#   rattler-build build -r conda/recipe.yaml -m conda/variants-local.yaml ...
+c_stdlib:
+  - sysroot
+c_stdlib_version:
+  - "2.17"

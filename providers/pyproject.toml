@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "m3flow-providers"
-version = "0.3.0"
+version = "0.3.2"
 description = "M3Flow provider processes: AutoPoly, LAMMPS, analysis (m3flow-provider/1 protocol)"
 license = "Apache-2.0"
 requires-python = ">=3.10"

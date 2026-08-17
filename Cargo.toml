@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/core", "crates/registry", "crates/runtime", "crates/cli", "crates/tui"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/Chenghao-Wu/m3flow"

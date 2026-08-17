@@ -4,3 +4,4 @@
 *.egg-info/
 .m3flow/
 /tmp/
+/conda/out/
