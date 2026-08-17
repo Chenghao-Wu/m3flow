@@ -3,16 +3,15 @@
 # One version number covers both halves — keep Cargo.toml [workspace.package]
 # and providers/pyproject.toml in lockstep with context.version below.
 #
-# Build locally:   rattler-build build -r conda/recipe.yaml --output-dir conda/out
+# Build locally:   rattler-build build -r conda/recipe.yaml -m conda/variants-local.yaml --output-dir conda/out
 # Install result:  mamba install -c conda/out m3flow      (or: anaconda upload …)
 #
-# For a tagged release build (and conda-forge submission), switch `source` to:
+# Source is the GitHub tag tarball (required for conda-forge). For a local dev
+# build against the working tree instead, temporarily replace source with:
 #   source:
-#     url: https://github.com/Chenghao-Wu/m3flow/archive/refs/tags/v${{ version }}.tar.gz
-#     sha256: <sha256 of the tag tarball>
-# conda-forge additionally requires bundling Rust dependency licenses:
-#   build: add cargo-bundle-licenses; script: cargo-bundle-licenses --format yaml --output THIRDPARTY.yml
-#   about:   license_file: [LICENSE, THIRDPARTY.yml]
+#     path: ..
+# After retagging a release, refresh sha256:
+#   curl -sL <url> | sha256sum
 
 context:
   name: m3flow
@@ -23,13 +22,15 @@ package:
   version: ${{ version }}
 
 source:
-  path: ..
+  url: https://github.com/Chenghao-Wu/m3flow/archive/refs/tags/v${{ version }}.tar.gz
+  sha256: 95b756f0c9dc08498e4582534760f4db7b69ee49b90b07d2c7343e78904b1249
 
 build:
   number: 0
   script:
     - if: unix
       then: |
+        cargo-bundle-licenses --format yaml --output THIRDPARTY.yml
         cargo build --release --locked
         mkdir -p "$PREFIX/bin"
         # conda's rust activation sets CARGO_BUILD_TARGET, which relocates
@@ -38,6 +39,7 @@ build:
         "$PYTHON" -m pip install ./providers --no-deps --no-build-isolation
     - if: win
       then: |
+        cargo-bundle-licenses --format yaml --output THIRDPARTY.yml
         cargo build --release --locked
         if defined CARGO_BUILD_TARGET (set "TDIR=target\%CARGO_BUILD_TARGET%\release") else (set "TDIR=target\release")
         copy "%TDIR%\m3flow.exe" "%LIBRARY_BIN%\m3flow.exe"
@@ -48,6 +50,7 @@ requirements:
     - ${{ compiler('rust') }}
     - ${{ compiler('c') }}      # rusqlite "bundled" compiles SQLite C sources
     - ${{ stdlib('c') }}
+    - cargo-bundle-licenses     # bundles Rust dep licenses into THIRDPARTY.yml
   host:
     - python
     - pip
@@ -76,10 +79,16 @@ about:
   homepage: https://github.com/Chenghao-Wu/m3flow
   repository: https://github.com/Chenghao-Wu/m3flow
   license: Apache-2.0
-  license_file: LICENSE
+  license_file:
+    - LICENSE
+    - THIRDPARTY.yml
   summary: "Multiscale Molecular Modeling workFLOW: task-centric, artifact-driven, provenance-first runtime between researchers and simulation software (AutoPoly, LAMMPS)"
   description: |
     Ships the self-contained m3flow runtime binary (19-task and 18-workflow
     libraries embedded) plus the Python provider processes speaking the
     m3flow-provider/1 JSON protocol. Simulation engines (LAMMPS, AutoPoly)
     are installed separately.
+
+extra:
+  recipe-maintainers:
+    - Chenghao-Wu
