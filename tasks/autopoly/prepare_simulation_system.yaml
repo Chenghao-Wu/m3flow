@@ -8,6 +8,18 @@ description: >
   SimulationSystem (LAMMPS data file + force-field includes). Stage 3 of
   system construction. Honors the SystemSpec environment (bulk density,
   interface geometry, ...) carried in the input artifact metadata.
+  Coarse-grained (bead-spring) systems are spec-driven: component
+  topology + options select the chain architecture (linear, ring, comb,
+  graft, star, dendrimer, tadpole, branched/custom; per-topology options —
+  comb: side/every/offset, graft: grafts, star: arms/center, dendrimer:
+  core/branch/branch_factor/generations, tadpole: tail/attach,
+  branched/custom: bonds/beads). environment.options and resolution.model
+  set the potentials (kremer_grest = FENE bonds + WCA pairs; explicit
+  environment.options keys win over the model preset): bond_style,
+  pair_style, k_bond, fene_r0, bond_length, use_angles, k_angle, theta0,
+  angle_types, include_branch_angles, generation_method, box_size.
+  bead_spring.bond_types with a single entry {style, k, r0, bond_length}
+  is an alternative spelling of the bond knobs (one global bond type).
 
 category: construction
 

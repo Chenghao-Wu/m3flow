@@ -38,7 +38,7 @@
               "last": {"type": "string"}
             }
           },
-          "topology": {"enum": ["linear", "ring", "star", "comb", "graft", "dendrimer", "branched"]},
+          "topology": {"enum": ["linear", "ring", "star", "comb", "graft", "dendrimer", "branched", "tadpole", "custom"]},
           "tacticity": {"enum": ["atactic", "isotactic", "syndiotactic"]},
           "degree_of_polymerization": {"type": "integer", "minimum": 1},
           "number_of_chains": {"type": "integer", "minimum": 1},
