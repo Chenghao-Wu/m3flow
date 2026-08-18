@@ -23,7 +23,7 @@ package:
 
 source:
   url: https://github.com/Chenghao-Wu/m3flow/archive/refs/tags/v${{ version }}.tar.gz
-  sha256: 95b756f0c9dc08498e4582534760f4db7b69ee49b90b07d2c7343e78904b1249
+  sha256: e9c321875757e2e7b4004e396cbc1c6d6dbf0ac4f91c4f956ebe221966eaa132
 
 build:
   number: 0
