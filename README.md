@@ -1,6 +1,6 @@
 # M3Flow
 **M**ultiscale **M**olecular **M**odeling workFLOW(M3Flow) sits between coding agents (Claude Code, etc.)
-or human researchers and simulation software (AutoPoly, LAMMPS), providing a
+or human researchers and computational software, providing a
 stable, discoverable, composable, and fully tracked execution environment.
 
 ```

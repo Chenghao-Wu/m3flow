@@ -7,7 +7,12 @@ Task mapping (tasks/autopoly/*.yaml):
 
 Coarse-grained (bead-spring) systems bypass the atomistic pipeline:
 build records a cg_spec.json, parameterize is a pass-through, and prepare
-drives AutoPoly's BeadSpringSystem directly.
+drives AutoPoly's BeadSpringSystem directly. CG structure and potentials
+are spec-driven: component ``topology`` + ``options`` select the chain
+architecture (linear, ring, comb, graft, star, dendrimer, tadpole,
+branched/custom); ``environment.options`` and ``resolution.model`` set the
+potentials (``kremer_grest`` = FENE bonds + WCA pairs), angle terms, box
+size and configuration-generation method.
 """
 
 from __future__ import annotations
@@ -21,7 +26,7 @@ import yaml
 from m3flow_provider import (Provider, ProviderFailure, artifact, read_request,
                              verdict)
 
-PROVIDER_VERSION = "0.3.1"
+PROVIDER_VERSION = "0.4.0"
 
 
 def _engine():
@@ -232,11 +237,12 @@ def parameterize_system(req):
     ff = params.get("force_field") or (meta.get("resolution") or {}).get("force_field") or "oplsaa"
 
     if meta.get("cg"):
-        # pass-through: restage the cg spec with the model recorded
-        src = inp["files"]["cg_spec"]
-        shutil.copy(src, "cg_spec.json")
-        cg = json.loads(Path("cg_spec.json").read_text())
-        cg["resolution"]["model"] = (cg.get("resolution") or {}).get("model") or "bead_spring"
+        # pass-through: restage the cg spec with the model recorded.
+        # Read the store file directly — shutil.copy would carry the
+        # store's read-only mode and make the rewrite fail.
+        cg = json.loads(Path(inp["files"]["cg_spec"]).read_text())
+        cg["resolution"] = cg.get("resolution") or {}
+        cg["resolution"]["model"] = cg["resolution"].get("model") or "bead_spring"
         Path("cg_spec.json").write_text(json.dumps(cg, indent=1))
         out = artifact("ParameterizedSystem",
                        files={"cg_spec": "cg_spec.json"},
@@ -657,10 +663,123 @@ def _density_check(data_file, target):
 
 # ------------------------------------------------------------------ CG path
 
+# Model presets for resolution.model; explicit environment.options keys win.
+_CG_MODEL_PRESETS = {
+    # Kremer-Grest: FENE bonds + purely repulsive WCA pairs.
+    "kremer_grest": {"bond_style": "fene", "pair_style": "wca"},
+}
+
+
+def _seq_input(value):
+    """JSON value -> AutoPoly SequenceInput.
+
+    Accepts a string ("AABB"), a flat list of bead names, a bare block pair
+    (["A", 20]), or a list of block pairs ([["A", 20], ["B", 10]]).
+    """
+    if isinstance(value, str):
+        return value
+
+    def _pair(x):
+        return (isinstance(x, (list, tuple)) and len(x) == 2
+                and isinstance(x[0], str) and isinstance(x[1], int)
+                and not isinstance(x[1], bool))
+
+    if isinstance(value, (list, tuple)):
+        if _pair(value):
+            return (value[0], value[1])
+        return [_pair(i) and (i[0], i[1]) or i for i in value]
+    raise ProviderFailure("input_invalid", "input_error",
+                          f"invalid bead sequence: {value!r}")
+
+
+def _cg_architecture(comp, backbone_seq, default_type):
+    """Map a component's topology (+ options) to an AutoPoly BeadArchitecture.
+
+    Per-topology parameters live in the component's ``options`` map:
+      comb:            side (sequence), every (int), offset (int, default 0)
+      graft:           grafts (map of backbone index -> side-chain sequence)
+      star:            arms (list of sequences), center (bead type)
+      dendrimer:       core, branch (bead types), branch_factor (default 2),
+                       generations (default 2)
+      tadpole:         tail (sequence), attach (ring index, default 0);
+                       the component sequence is the ring
+      branched/custom: bonds (list of [i, j]); bead list from options.beads
+                       or the component sequence
+    """
+    import AutoPoly
+    arch = AutoPoly.architectures
+    topo = (comp.get("topology") or "linear").lower()
+    opts = comp.get("options") or {}
+    name = comp["id"]
+
+    def need(key):
+        if opts.get(key) is None:
+            raise ProviderFailure(
+                "input_invalid", "input_error",
+                f"component '{comp['id']}': topology '{topo}' requires "
+                f"options.{key}")
+        return opts[key]
+
+    try:
+        if topo == "linear":
+            return arch.linear(backbone_seq, name=name)
+        if topo == "ring":
+            return arch.ring(backbone_seq, name=name)
+        if topo == "comb":
+            return arch.comb(backbone_seq, _seq_input(need("side")),
+                             int(need("every")), int(opts.get("offset", 0)),
+                             name=name)
+        if topo == "graft":
+            grafts = {int(k): _seq_input(v) for k, v in need("grafts").items()}
+            return arch.graft(backbone_seq, grafts, name=name)
+        if topo == "star":
+            arms = [_seq_input(a) for a in need("arms")]
+            return arch.star(str(opts.get("center") or default_type),
+                             arms, name=name)
+        if topo == "dendrimer":
+            return arch.dendrimer(str(opts.get("core") or default_type),
+                                  str(opts.get("branch") or default_type),
+                                  int(opts.get("branch_factor", 2)),
+                                  int(opts.get("generations", 2)), name=name)
+        if topo == "tadpole":
+            return arch.tadpole(backbone_seq, _seq_input(need("tail")),
+                                int(opts.get("attach", 0)), name=name)
+        if topo in ("branched", "custom"):
+            beads = opts.get("beads")
+            beads = (arch.normalize_sequence(_seq_input(beads))
+                     if beads is not None else list(backbone_seq or []))
+            bonds = [(int(i), int(j)) for i, j in need("bonds")]
+            return arch.custom(beads, bonds, name=name)
+    except ValueError as e:
+        raise ProviderFailure("input_invalid", "input_error",
+                              f"component '{comp['id']}' ({topo}): {e}")
+    raise ProviderFailure(
+        "input_invalid", "input_error",
+        f"component '{comp['id']}': unsupported bead-spring topology "
+        f"'{topo}' — supported: linear, ring, comb, graft, star, "
+        "dendrimer, tadpole, branched/custom")
+
+
 def _prepare_cg(req, inp, meta, params):
+    """CG path: drive AutoPoly's BeadSpringSystem directly.
+
+    System-wide potential knobs come from ``environment.options`` (gaps are
+    filled from the ``resolution.model`` preset, then AutoPoly defaults):
+      bond_style (harmonic|fene), pair_style (lj|wca), k_bond, fene_r0,
+      bond_length, use_angles, k_angle, theta0,
+      angle_types ([{triplet: [A, B, A], k, theta0}]),
+      include_branch_angles, generation_method (saw|geometric|mc),
+      box_size (LJ sigma units)
+    ``bead_spring.bond_types`` with a single entry {style, k, r0,
+    bond_length} is an alternative spelling of the bond knobs (AutoPoly
+    supports one global bond type).
+    """
     import AutoPoly
     cg = json.loads(Path(inp["files"]["cg_spec"]).read_text())
     env = cg.get("environment") or {}
+    env_opts = env.get("options") or {}
+    model = str((cg.get("resolution") or {}).get("model") or "").lower()
+    preset = _CG_MODEL_PRESETS.get(model, {})
     density_q = params.get("target_density") or env.get("target_density")
     density = density_q["value"] if isinstance(density_q, dict) else None
 
@@ -685,20 +804,94 @@ def _prepare_cg(req, inp, meta, params):
 
     if not bead_types:
         bead_types["A"] = AutoPoly.BeadType("A")
+    default_type = next(iter(bead_types))
 
-    system = AutoPoly.System(out="autopoly")
-    bss = AutoPoly.BeadSpringSystem(
-        cg.get("name", "cg"), system, list(bead_types.values()),
-        density=density, generation_method="saw")
+    # AutoPoly has one global bond type; bead_spring.bond_types may carry it.
+    bond_defs = []
+    for comp in species:
+        bond_defs.extend((comp.get("bead_spring") or {}).get("bond_types") or [])
+    if len(bond_defs) > 1:
+        raise ProviderFailure(
+            "input_invalid", "input_error",
+            "CG systems support a single global bond type; got "
+            f"{len(bond_defs)} bead_spring.bond_types entries")
+    bond_def = bond_defs[0] if bond_defs else {}
+
+    def knob(key, bond_key, default):
+        if key in env_opts:
+            return env_opts[key]
+        if bond_key and bond_key in bond_def:
+            return bond_def[bond_key]
+        return preset.get(key, default)
+
+    bond_style = str(knob("bond_style", "style", "harmonic"))
+    pair_style = str(knob("pair_style", None, "lj"))
+    k_bond = float(knob("k_bond", "k", 30.0))
+    fene_r0 = float(knob("fene_r0", "r0", 1.5))
+    bond_length = float(knob("bond_length", "bond_length", 1.0))
+    use_angles = bool(env_opts.get("use_angles", False))
+    default_k_angle = float(env_opts.get("k_angle", 10.0))
+    default_theta0 = float(env_opts.get("theta0", 180.0))
+    include_branch_angles = bool(env_opts.get("include_branch_angles", True))
+    generation_method = str(env_opts.get("generation_method", "saw"))
+    angle_types = [
+        AutoPoly.AngleType(tuple(a["triplet"]),
+                           float(a.get("k", default_k_angle)),
+                           float(a.get("theta0", default_theta0)))
+        for a in env_opts.get("angle_types") or []
+    ]
+
+    # explicit box: environment.options.box_size, or a cubic environment.box
+    box_size = env_opts.get("box_size")
+    env_box = env.get("box")
+    if (box_size is None and isinstance(env_box, dict)
+            and env_box.get("x") is not None):
+        vals = []
+        for k in ("x", "y", "z"):
+            d = env_box.get(k)
+            vals.append(d.get("value") if isinstance(d, dict) else d)
+        if vals[0] is not None:
+            if len({float(v) for v in vals if v is not None}) > 1:
+                raise ProviderFailure(
+                    "input_invalid", "input_error",
+                    "CG boxes are cubic; got differing environment.box dims")
+            box_size = vals[0]
+    if box_size is not None:
+        box_size = float(box_size)
+
+    # Build architectures before constructing the system so that box sizing
+    # sees the true bead counts.
+    chains = []  # (architecture, n_chains, component id)
     for comp in species:
         rep = comp["representation"]
         n_chains = comp.get("number_of_chains") or comp.get("count") or 1
         dop = comp.get("degree_of_polymerization") or comp.get("dop") or 10
-        seq = rep.get("sequence") or [next(iter(bead_types))] * dop
-        topo = comp.get("topology") or "linear"
-        arch_fn = (AutoPoly.architectures.ring if topo == "ring"
-                   else AutoPoly.architectures.linear)
-        bss.add_species(arch_fn(seq, name=comp["id"]), n_chains, name=comp["id"])
+        seq = rep.get("sequence") or [default_type] * dop
+        architecture = _cg_architecture(comp, seq, default_type)
+        chains.append((architecture, n_chains, comp["id"]))
+
+    if (box_size is None and density is None
+            and env.get("type") == "isolated"):
+        # vacuum: box comfortably larger than the longest chain contour
+        longest = max(a.n_beads for a, _, _ in chains)
+        box_size = max(2.0 * longest * bond_length, 50.0)
+
+    system = AutoPoly.System(out="autopoly")
+    bss = AutoPoly.BeadSpringSystem(
+        cg.get("name", "cg"), system, list(bead_types.values()),
+        bond_length=bond_length, bond_style=bond_style, k_bond=k_bond,
+        fene_r0=fene_r0, pair_style=pair_style, use_angles=use_angles,
+        default_k_angle=default_k_angle, default_theta0=default_theta0,
+        angle_types=angle_types or None,
+        include_branch_angles=include_branch_angles,
+        density=density, box_size=box_size,
+        generation_method=generation_method)
+    for architecture, n_chains, comp_id in chains:
+        try:
+            bss.add_species(architecture, n_chains, name=comp_id)
+        except ValueError as e:
+            raise ProviderFailure("input_invalid", "input_error",
+                                  f"component '{comp_id}': {e}")
     try:
         bss.generate(backend="moltemplate")
     except Exception as e:
@@ -725,7 +918,14 @@ def _prepare_cg(req, inp, meta, params):
         files=files,
         metadata={**meta, "engine": "lammps", "units": "lj",
                   "atom_style": "molecular", "box": _box_of(mt / "system.data")},
-        data={"n_atoms": _atom_count(mt / "system.data")})
+        data={"n_atoms": _atom_count(mt / "system.data"),
+              "n_bonds": sum(a.n_bonds * n for a, n, _ in chains),
+              "bond_style": bond_style, "pair_style": pair_style,
+              "architectures": {cid: {"architecture": a.name,
+                                      "n_beads": a.n_beads,
+                                      "n_bonds": a.n_bonds,
+                                      "n_chains": n}
+                                for a, n, cid in chains}})
     return {
         "outputs": {"system": out},
         "validation": [

@@ -37,6 +37,12 @@ parameters:
   extension_duration: {type: time, default: 200 ps}
   timestep: {type: time, default: 1 fs}
   seed: {type: integer, default: 12345}
+  density_drift_threshold: {type: number, default: 0.01,
+                            description: "Gate — max relative density drift over the tail."}
+  stationarity_sigma: {type: number, default: 3.0,
+                       description: "Gate — max tail-mean shift, in tail standard deviations."}
+  tail_fraction: {type: number, default: 0.5,
+                  description: "Gate — fraction of the series treated as the tail."}
 
 stages:
   - {ensemble: minimize, name: s01_minimize, duration: 5 ps, timestep: 0.5 fs}
@@ -62,6 +68,10 @@ steps:
     inputs:
       thermo: "${s06_npt.thermo}"
       trajectory: "${s06_npt.trajectory}"
+    parameters:
+      density_drift_threshold: "${params.density_drift_threshold}"
+      stationarity_sigma: "${params.stationarity_sigma}"
+      tail_fraction: "${params.tail_fraction}"
 
   promote_base:
     task: promote_equilibrated_state
@@ -87,6 +97,10 @@ steps:
     inputs:
       thermo: "${extend_npt.thermo}"
       trajectory: "${extend_npt.trajectory}"
+    parameters:
+      density_drift_threshold: "${params.density_drift_threshold}"
+      stationarity_sigma: "${params.stationarity_sigma}"
+      tail_fraction: "${params.tail_fraction}"
 
   promote_extended:
     task: promote_equilibrated_state
