@@ -12,6 +12,8 @@ molecular simulation.
 ## Focused documents
 
 - [Concepts](concepts.md) — tasks, artifacts, workflows, runtime, provenance
+- [Running on Slurm](slurm.md) — submit tasks as cluster jobs; config,
+  resources mapping, failure taxonomy
 - [Agent-facing JSON contract](json-contract.md) — `--json` output shapes and
   the error taxonomy
 - [Provider protocol](provider-protocol.md) — `m3flow-provider/1`

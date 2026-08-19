@@ -51,6 +51,24 @@ pub struct ProviderError {
     pub raw_log: Option<String>,
 }
 
+impl ExecuteResponse {
+    /// Parse a protocol doc and persist the raw response to the workdir for
+    /// inspectability. Shared by the local executor (stdout of a subprocess)
+    /// and the Slurm executor (captured stdout file).
+    pub fn persist_and_parse(v: serde_json::Value, workdir: &Path, provider: &str) -> Result<Self> {
+        let _ = std::fs::write(
+            workdir.join("response.json"),
+            serde_json::to_string_pretty(&v).unwrap_or_default(),
+        );
+        serde_json::from_value(v).map_err(|e| M3FlowError::Provider {
+            provider: provider.to_string(),
+            message: format!("malformed execute response: {e}"),
+            details: None,
+            raw_log: None,
+        })
+    }
+}
+
 impl ProviderHandle {
     /// Locate a provider executable: project config first, then PATH.
     pub fn locate(name: &str, config: Option<&ProviderConfig>) -> Result<Self> {
@@ -140,17 +158,7 @@ impl ProviderHandle {
 
     pub fn execute(&self, request_path: &Path, workdir: &Path) -> Result<ExecuteResponse> {
         let v = self.run_json("execute", Some(request_path))?;
-        // persist the raw response for inspectability
-        let _ = std::fs::write(
-            workdir.join("response.json"),
-            serde_json::to_string_pretty(&v).unwrap_or_default(),
-        );
-        serde_json::from_value(v).map_err(|e| M3FlowError::Provider {
-            provider: self.name.clone(),
-            message: format!("malformed execute response: {e}"),
-            details: None,
-            raw_log: None,
-        })
+        ExecuteResponse::persist_and_parse(v, workdir, &self.name)
     }
 
     pub fn diagnose(&self, request_path: &Path) -> Result<serde_json::Value> {

@@ -34,6 +34,9 @@ pub struct RunOptions {
     /// identity. `None` → the tree groups by workflow name.
     pub label: Option<String>,
     pub max_concurrency: Option<usize>,
+    /// `--executor` CLI override for this run. Scheduling-only: never part of
+    /// spec_hash, cache keys, or artifact identity.
+    pub executor_override: Option<crate::project::ExecutorKind>,
     pub progress: Option<Box<dyn Fn(&str) + Send>>,
 }
 
@@ -134,6 +137,7 @@ pub fn run_workflow(
             .unwrap_or_else(|| project.max_concurrency()),
         no_cache: opts.no_cache,
         materialize: project.materialize_enabled() && !opts.no_materialize,
+        executor_override: opts.executor_override,
         progress: opts.progress,
         resume: BTreeMap::new(),
         project: project.clone(),
@@ -271,6 +275,7 @@ fn resume_impl(
         max_concurrency: project.max_concurrency(),
         no_cache: false,
         materialize: project.materialize_enabled(),
+        executor_override: None,
         progress,
         resume,
         project: project.clone(),

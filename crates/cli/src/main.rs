@@ -114,10 +114,30 @@ enum WfCmd {
         /// Limit concurrent tasks.
         #[arg(long)]
         max_concurrency: Option<usize>,
+        /// Execution backend override for this run (overrides
+        /// `executor.type` and per-provider overrides in m3flow.yaml).
+        #[arg(long, value_enum)]
+        executor: Option<CliExecutor>,
         /// Compile and print the plan without executing.
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+/// `--executor` value enum (mirrors `ExecutorKind` in the runtime).
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum CliExecutor {
+    Local,
+    Slurm,
+}
+
+impl From<CliExecutor> for m3flow_runtime::project::ExecutorKind {
+    fn from(v: CliExecutor) -> Self {
+        match v {
+            CliExecutor::Local => m3flow_runtime::project::ExecutorKind::Local,
+            CliExecutor::Slurm => m3flow_runtime::project::ExecutorKind::Slurm,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -467,6 +487,7 @@ fn wf_cmd(c: WfCmd, json: bool) -> Result<i32> {
             no_materialize,
             label,
             max_concurrency,
+            executor,
             dry_run,
         } => {
             let p = project()?;
@@ -491,6 +512,7 @@ fn wf_cmd(c: WfCmd, json: bool) -> Result<i32> {
                     no_materialize,
                     label,
                     max_concurrency,
+                    executor_override: executor.map(Into::into),
                     progress,
                 },
             )?;

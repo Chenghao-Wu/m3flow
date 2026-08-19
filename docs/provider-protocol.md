@@ -67,6 +67,9 @@ Checks an execute request without running it (input files exist, parameters cohe
 - `inputs.<name>.files` are **absolute** paths into the artifact store. Providers must never write into them.
 - All files a provider wants returned as outputs must be written inside `workdir`.
 - `parameters` are canonicalized by the core (quantities become `{"value","unit"}` in canonical units).
+- `execute` may run on a **different host** than the m3flow driver (e.g. a
+  compute node under the [Slurm executor](slurm.md)): rely only on `workdir`
+  and the declared input paths, never on the driver's environment.
 
 ### Response (success)
 

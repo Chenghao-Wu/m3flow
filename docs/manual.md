@@ -271,6 +271,14 @@ providers:
     python: /path/to/python              # for Python providers
     engine: {executable: /path/to/lmp, mpi: false, np: 8}
     extra: {...}                          # free-form, forwarded in `config`
+    executor: local                       # per-provider override: local | slurm
+executor:
+  type: local                             # local (default) | slurm
+  slurm:                                  # see docs/slurm.md
+    partition: gpua800
+    qos: 4gpus
+    poll_interval_secs: 15
+    setup_commands: [module load anaconda3, source activate autopoly]
 defaults: {...}
 ```
 
@@ -279,6 +287,12 @@ For the LAMMPS provider, the effective core count is the task/step
 than one core the engine runs via `mpirun -np N` (override the launcher with
 `engine.launcher`); `engine.mpi: false` selects OpenMP threading
 (`OMP_NUM_THREADS` + `-sf omp`) instead of MPI ranks.
+
+The `executor` section selects **where provider jobs run** (see
+[Slurm execution](slurm.md)). Executor selection is a scheduling concern:
+like `resources`, it never joins cache keys, spec hashes, or artifact
+identity. Precedence: `--executor` CLI flag > `providers.<name>.executor` >
+`executor.type` > `local`.
 
 Project layout after a run:
 
@@ -307,10 +321,13 @@ project, registry commands still work with builtins.
 2. **Bind** — inputs come from `--input name=art_…` (existing artifact) or
    `name=@file`. SystemSpec files are schema-validated and registered as
    `Spec` artifacts, so provenance chains start at the human-authored spec.
-3. **Execute** — a concurrent local scheduler runs ready nodes
+3. **Execute** — a concurrent scheduler runs ready nodes
    (`--max-concurrency` to cap), dispatching each node to its provider
    process over `m3flow-provider/1` and ingesting returned files into the
-   CAS.
+   CAS. With `executor.type: slurm` the same provider call is submitted to
+   the cluster via `sbatch` instead of run locally (see
+   [Slurm execution](slurm.md)); `--max-concurrency` then caps in-flight
+   Slurm jobs.
 
 ### 6.1 Caching
 
@@ -341,7 +358,8 @@ retries recoverable categories automatically.
 - `m3flow run resume <wr>` — keep completed steps, re-run the rest.
 - `m3flow run retry <wr> <step>` — re-execute one step and everything
   downstream of it.
-- `m3flow run cancel <wr>` — request cancellation.
+- `m3flow run cancel <wr>` — request cancellation; with the Slurm executor
+  in-flight jobs are additionally `scancel`ed.
 
 Provider task failures include `raw_log` (the engine log tail) and
 `m3flow run logs <wr> [--step …]` surfaces the full request/response and

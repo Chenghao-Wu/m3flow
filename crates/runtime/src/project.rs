@@ -23,10 +23,69 @@ pub struct ProjectConfig {
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
     pub defaults: Option<Defaults>,
+    /// Execution backend for provider jobs. Scheduling-only: never joins
+    /// cache keys or fingerprints (same rule as `resources`).
+    #[serde(default)]
+    pub executor: Option<ExecutorConfig>,
 }
 
 fn default_schema() -> String {
     "m3flow-project/v1".to_string()
+}
+
+/// Where a provider job runs. Serializes lowercase (`local` | `slurm`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecutorKind {
+    Local,
+    Slurm,
+}
+
+impl Default for ExecutorKind {
+    fn default() -> Self {
+        ExecutorKind::Local
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExecutorConfig {
+    /// Backend selection: `local` (default) | `slurm`.
+    #[serde(rename = "type", default)]
+    pub kind: Option<ExecutorKind>,
+    /// Slurm backend options; all optional, see docs/slurm.md.
+    #[serde(default)]
+    pub slurm: Option<SlurmConfig>,
+}
+
+/// Options for the Slurm executor. Everything is optional: an empty section
+/// submits to the cluster default partition with site defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SlurmConfig {
+    #[serde(default)]
+    pub partition: Option<String>,
+    #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
+    pub qos: Option<String>,
+    /// GPU model for `--gres=gpu:<type>:<N>` when a step requests GPUs.
+    #[serde(default)]
+    pub gpu_type: Option<String>,
+    /// Verbatim `--gres` string; wins over `gpu_type`.
+    #[serde(default)]
+    pub gres: Option<String>,
+    /// Default `--time` when a step declares no `resources.walltime`.
+    #[serde(default)]
+    pub time: Option<String>,
+    /// Base poll cadence for job state (±30% jitter). Default: 15 s.
+    #[serde(default)]
+    pub poll_interval_secs: Option<u64>,
+    /// Shell lines run in the batch script before the provider call
+    /// (module loads, conda activation, …).
+    #[serde(default)]
+    pub setup_commands: Vec<String>,
+    /// Verbatim extra `#SBATCH` lines (site-specific directives).
+    #[serde(default)]
+    pub extra_sbatch: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -43,6 +102,10 @@ pub struct ProviderConfig {
     /// Free-form extra config forwarded to the provider in `config`.
     #[serde(default)]
     pub extra: Option<serde_json::Value>,
+    /// Executor override for this provider (`local` | `slurm`); overrides the
+    /// global `executor.type` but not a `--executor` CLI flag.
+    #[serde(default)]
+    pub executor: Option<ExecutorKind>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -112,6 +175,7 @@ impl Project {
             registries: None,
             providers: BTreeMap::new(),
             defaults: None,
+            executor: None,
         };
         let text = serde_yaml::to_string(&cfg)
             .map_err(|e| M3FlowError::internal(format!("yaml encode: {e}")))?;
@@ -155,6 +219,31 @@ impl Project {
 
     pub fn provider_config(&self, name: &str) -> Option<&ProviderConfig> {
         self.config.providers.get(name)
+    }
+
+    /// Executor for a provider job. Precedence: `--executor` CLI flag >
+    /// `providers.<name>.executor` > `executor.type` > local.
+    pub fn executor_for(&self, provider: &str, cli_override: Option<ExecutorKind>) -> ExecutorKind {
+        if let Some(k) = cli_override {
+            return k;
+        }
+        if let Some(k) = self.config.providers.get(provider).and_then(|p| p.executor) {
+            return k;
+        }
+        self.config
+            .executor
+            .as_ref()
+            .and_then(|e| e.kind)
+            .unwrap_or_default()
+    }
+
+    /// Slurm backend options (empty defaults when the section is absent).
+    pub fn slurm_config(&self) -> SlurmConfig {
+        self.config
+            .executor
+            .as_ref()
+            .and_then(|e| e.slurm.clone())
+            .unwrap_or_default()
     }
 
     pub fn max_concurrency(&self) -> usize {

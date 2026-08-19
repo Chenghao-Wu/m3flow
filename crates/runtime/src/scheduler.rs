@@ -8,8 +8,9 @@
 //! failed dependency become CANCELLED when the run ends.
 
 use crate::db::{Db, TaskRunRecord, WorkflowRunRecord};
+use crate::executor::{self, Executor};
 use crate::ir::{CompiledWorkflow, InputBinding, IrNode};
-use crate::project::Project;
+use crate::project::{ExecutorKind, Project};
 use crate::provider::{ExecuteResponse, ProviderHandle};
 use crate::store::Store;
 use m3flow_core::artifact::{now_rfc3339, Artifact, RunStatus, TaskStatus};
@@ -46,6 +47,8 @@ pub struct RunContext {
     pub resume: BTreeMap<String, ResumedNode>,
     /// Always-on friendly `results/` tree (presentation-only, best-effort).
     pub materialize: bool,
+    /// `--executor` CLI override (scheduling-only, never fingerprinted).
+    pub executor_override: Option<ExecutorKind>,
     pub progress: Option<Box<dyn Fn(&str) + Send>>,
 }
 
@@ -63,10 +66,12 @@ struct Job {
     task_run_id: TaskRunId,
     attempt: u32,
     provider: ProviderHandle,
+    executor: Executor,
     request: serde_json::Value,
     workdir: PathBuf,
     store_root: PathBuf,
     expected_validators: Vec<String>,
+    cancel_flag: PathBuf,
 }
 
 enum OutcomeKind {
@@ -669,8 +674,14 @@ fn build_job(
         node: node.clone(),
         task_run_id,
         attempt,
+        executor: Executor::resolve(&ctx.project, &provider.name, ctx.executor_override),
         provider,
         request,
+        cancel_flag: ctx
+            .project
+            .runs_dir()
+            .join(ctx.run.id.as_str())
+            .join("CANCEL"),
         workdir,
         store_root: ctx.project.artifacts_dir(),
         expected_validators: task.validation.clone(),
@@ -725,7 +736,15 @@ fn run_job(job: &Job) -> OutcomeKind {
             false,
         );
     }
-    let resp: ExecuteResponse = match job.provider.execute(&request_path, &job.workdir) {
+    let resp: ExecuteResponse = match executor::execute_provider(
+        &job.executor,
+        &job.provider,
+        &request_path,
+        &job.workdir,
+        &job.node.id,
+        job.node.resources.as_ref(),
+        &job.cancel_flag,
+    ) {
         Ok(r) => r,
         Err(e) => {
             return failure(

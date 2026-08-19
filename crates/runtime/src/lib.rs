@@ -3,6 +3,7 @@
 
 pub mod compile;
 pub mod db;
+pub mod executor;
 pub mod ir;
 pub mod materialize;
 pub mod project;
