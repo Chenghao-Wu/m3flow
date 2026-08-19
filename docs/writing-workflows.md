@@ -45,6 +45,28 @@ outputs:
 - Whole-string refs substitute the value; embedded refs interpolate into
   strings (`"${T} K"` — handy to build quantities from loop variables).
 
+## Step fields
+
+A step may override its task's defaults — notably `provider`, `retry`, and
+`resources`:
+
+```yaml
+steps:
+  production:
+    task: run_md
+    inputs: {state: "${equil.state}"}
+    resources: {cpu: 16, gpu: 1, walltime: 24 h}   # this step only
+```
+
+`resources` on a step **replaces** the task's `resources` block wholesale
+(it is not a field-level merge: if the task declares
+`{cpu: 4, walltime: 30 min}` and the step declares `{cpu: 16}`, the step
+runs with no declared walltime — the Slurm `time` config default applies).
+Task-level `resources` are just the author's default sizing; workflows size
+for their actual systems, and no task ever needs to be duplicated just to
+change resources. Resources are scheduling-only — they never join cache
+keys, so re-sizing a step does not invalidate the cache.
+
 ## stages
 
 `{ensemble: minimize|nvt|npt|nve, temperature(_start/_end), pressure,
