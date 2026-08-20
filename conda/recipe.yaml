@@ -1,7 +1,8 @@
 # Combined conda package: Rust core (m3flow binary, with tasks/workflows/schemas
 # embedded) + Python providers (m3flow-autopoly/-lammps/-analysis console scripts).
-# One version number covers both halves — keep Cargo.toml [workspace.package]
-# and providers/pyproject.toml in lockstep with context.version below.
+# One version number covers both halves — scripts/release.sh bumps Cargo.toml
+# [workspace.package], providers/pyproject.toml and context.version together,
+# tags, pushes, and refreshes the sha256 below.
 #
 # Build locally:   rattler-build build -r conda/recipe.yaml -m conda/variants-local.yaml --output-dir conda/out
 # Install result:  mamba install -c conda/out m3flow      (or: anaconda upload …)
