@@ -29,20 +29,35 @@ treated as proof of equilibration.
 ```bash
 # 1. Download the m3flow binary for your platform from
 #    https://github.com/Chenghao-Wu/m3flow/releases/latest
-#    and put it on PATH (tarball for Linux/macOS, zip for Windows;
-#    the linux-musl build is fully static and works on older clusters).
+#    and put it on PATH. Pick the target:
+#      x86_64-unknown-linux-gnu     recent Linux (glibc ≥ 2.39)
+#      x86_64-unknown-linux-musl    fully static — older clusters, any distro
+#      x86_64-apple-darwin          Intel Mac
+#      aarch64-apple-darwin         Apple Silicon
+#      x86_64-pc-windows-msvc       Windows (zip)
 tar xzf m3flow-<version>-<target>.tar.gz
 sudo install m3flow-<version>-<target>/m3flow /usr/local/bin/
 
-# 2. Providers (Python, JSON-protocol processes on PATH)
+# 2. Providers (Python, JSON-protocol processes on PATH). Released on the
+#    same tag train as the binary — latest PyPI matches the latest release.
 pip install m3flow-providers   # or: download the .whl from the release
                                # page and `pip install` that file
 
-# 3. Engines
-#   AutoPoly: importable in the provider's Python env
-#   LAMMPS:   `lmp` on PATH, or configure in m3flow.yaml:
+# 3. Engines (external on purpose — install into the providers' Python env
+#    or onto PATH):
+#   LAMMPS:   `mamba install -c conda-forge lammps`, or point at an
+#             existing binary in m3flow.yaml:
 #             providers: {lammps: {engine: {executable: /path/to/lmp}}}
+#   AutoPoly: `pip install git+https://github.com/WuGroup-XJTLU/AutoPoly.git`
+#             (the AutoPoly 0.0.1 on PyPI predates the current API —
+#             install from the GitHub repo)
 ```
+
+**Conda:** a combined conda package (binary + providers in one) is planned
+for conda-forge; the rattler-build recipe lives in `conda/` and can be
+built locally meanwhile (`rattler-build build -r conda/recipe.yaml
+-m conda/variants-local.yaml --output-dir conda/out`, then
+`mamba install -c conda/out m3flow`).
 
 **From source:**
 
