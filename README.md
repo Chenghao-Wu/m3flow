@@ -9,6 +9,8 @@ SystemSpec ──▶ tasks ──▶ artifacts ──▶ workflows ──▶ res
                   └── provenance + content-addressed cache ──┘
 ```
 
+**Documentation: https://chenghao-wu.github.io/m3flow/**
+
 ## Concepts in one paragraph
 
 Everything is a **task** (a versioned, typed unit of work with declared

@@ -1,0 +1,97 @@
+site_name: M3Flow
+site_description: >-
+  Task-centric, artifact-driven, provenance-first workflow runtime for
+  molecular simulation
+site_url: https://chenghao-wu.github.io/m3flow/
+repo_url: https://github.com/Chenghao-Wu/m3flow
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2026 Zhenghao Wu
+
+theme:
+  name: material
+  logo: assets/flow.svg
+  favicon: assets/flow.svg
+  language: en
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.action.edit
+
+plugins:
+  - search
+  - autorefs
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [providers/src]
+          options:
+            docstring_style: google
+            docstring_section_style: spacy
+            show_source: true
+            show_root_heading: true
+            members_order: source
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Chenghao-Wu/m3flow
+      name: M3Flow on GitHub
+
+nav:
+  - Home: index.md
+  - Installation: install.md
+  - User Guide:
+      - Concepts: concepts.md
+      - The Complete Manual: manual.md
+      - Writing Workflows: writing-workflows.md
+      - Running on Slurm: slurm.md
+      - Agent-Facing JSON Contract: json-contract.md
+  - Code Documentation:
+      - m3flow_provider (protocol runtime): api/m3flow_provider.md
+      - m3flow_autopoly: api/m3flow_autopoly.md
+      - m3flow_lammps: api/m3flow_lammps.md
+      - m3flow_analysis: api/m3flow_analysis.md
+  - Developer Guide:
+      - Writing Tasks and Providers: writing-tasks.md
+      - Provider Protocol: provider-protocol.md
+      - Updating the Docs: updating-docs.md
+      - Agent Benchmark: agent-benchmark.md
+  - About:
+      - Releases & Changelog: https://github.com/Chenghao-Wu/m3flow/releases
+      - License (Apache-2.0): https://github.com/Chenghao-Wu/m3flow/blob/main/LICENSE
