@@ -61,6 +61,34 @@ def _engine():
     return {"name": "lammps", "version": "unknown"}
 
 
+_PKG_CACHE: dict = {}
+
+
+def _installed_packages(exe):
+    """LAMMPS packages compiled into `exe`, parsed from `lmp -h` (cached).
+
+    Keyed on exe path + mtime so a rebuilt binary re-probes. Returns an
+    empty frozenset when the probe fails — callers treat that as
+    "no acceleration packages" rather than an error.
+    """
+    try:
+        key = f"{exe}:{Path(exe).stat().st_mtime}"
+    except OSError:
+        key = exe
+    if key not in _PKG_CACHE:
+        try:
+            out = subprocess.run([exe, "-h"], capture_output=True,
+                                 text=True, timeout=60)
+            text = out.stdout + out.stderr
+        except (OSError, subprocess.TimeoutExpired):
+            text = ""
+        m = re.search(r"Installed packages:\s*\n+(.*?)(?:\n\s*\n|\Z)",
+                      text, re.S)
+        _PKG_CACHE.clear()  # only ever probe one active binary
+        _PKG_CACHE[key] = frozenset(m.group(1).split()) if m else frozenset()
+    return _PKG_CACHE[key]
+
+
 # ------------------------------------------------------------------ context
 
 class Ctx:
@@ -410,29 +438,123 @@ def deck_deform(ctx):
 
 # ------------------------------------------------------------------ execution
 
+def _pk_args(opts):
+    """Flatten a package-options dict into `key value` tokens (bool -> on/off)."""
+    args = []
+    for k, v in (opts or {}).items():
+        if isinstance(v, bool):
+            v = "on" if v else "off"
+        args += [str(k), str(v)]
+    return args
+
+
+def _gpu_flags(req, exe, ng):
+    """Acceleration flags for LAMMPS's two GPU frameworks (docs: Speed_gpu,
+    Speed_kokkos), chosen against the binary's installed packages.
+
+    config["gpu"] is bool | dict:
+      backend: auto | kokkos | gpu   (auto: probe, KOKKOS preferred)
+      options: extra -pk args, e.g. {split: -1, neigh: no} for the GPU
+               package or {comm: device} for Kokkos
+    Returns (flags, mode_label). Raises gpu_backend_unavailable when the
+    requested backend is not compiled into `exe`.
+    """
+    cfg = req.get("config") or {}
+    gcfg = cfg.get("gpu")
+    gcfg = {} if gcfg is True else (gcfg or {})
+    have = _installed_packages(exe)
+    backend = gcfg.get("backend") or "auto"
+    if backend == "auto":
+        backend = "kokkos" if "KOKKOS" in have else \
+                  "gpu" if "GPU" in have else None
+    if backend not in ("kokkos", "gpu"):
+        raise ProviderFailure(
+            "gpu_backend_unavailable", "environment_error",
+            f"GPU requested ({ng} device(s)) but {exe} has neither KOKKOS nor "
+            "GPU package installed",
+            recoverable=False)
+    pkg = "KOKKOS" if backend == "kokkos" else "GPU"
+    if pkg not in have:
+        raise ProviderFailure(
+            "gpu_backend_unavailable", "environment_error",
+            f"gpu.backend='{backend}' requested but {pkg} is not among "
+            f"{exe}'s installed packages",
+            recoverable=False)
+    pk = _pk_args(gcfg.get("options"))
+    if backend == "kokkos":
+        flags = ["-k", "on", "g", str(ng), "-sf", "kk"]
+        if pk:
+            flags += ["-pk", "kokkos"] + pk
+        return flags, f"kokkos-gpu x{ng}"
+    return ["-sf", "gpu", "-pk", "gpu", str(ng)] + pk, f"gpu-pkg x{ng}"
+
+
 def _parallel_cmd(req, exe):
     """Resolve launch command + env from declared resources / engine config.
 
     Precedence: req["resources"]["cpu"] (per-task/step) > config["np"] > 1.
     config["mpi"] == false selects OpenMP threading instead of MPI ranks.
+
+    GPU: enabled when req["resources"]["gpu"] > 0 (scheduled via Slurm
+    --gres) or config["gpu"] is set (true, or a dict — see _gpu_flags).
+    MPI ranks default to ranks_per_gpu x N_gpu (1 x N_gpu unless config
+    overrides); host threads per rank = resources.cpu / ranks. With the
+    Kokkos backend, config["gpu"]["devices"] pins CUDA_VISIBLE_DEVICES on
+    non-Slurm hosts. Styles without a /kk or /gpu variant silently fall
+    back to the host version (LAMMPS suffix semantics).
     """
     resources = req.get("resources") or {}
     cfg = req.get("config") or {}
     try:
-        np_ = int(resources.get("cpu") or cfg.get("np") or 1)
+        ncpu = int(resources.get("cpu") or cfg.get("np") or 1)
     except (TypeError, ValueError):
-        np_ = 1
-    np_ = max(1, np_)
+        ncpu = 1
+    ncpu = max(1, ncpu)
     base = [exe, "-in", "in.m3flow", "-log", "log.lammps", "-screen", "none"]
-    if np_ == 1:
+
+    gcfg = cfg.get("gpu")
+    gcfg = {} if gcfg is True else (gcfg or {})
+    try:
+        ng = int(resources.get("gpu") or 0)
+    except (TypeError, ValueError):
+        ng = 0
+    devices = gcfg.get("devices")
+    if isinstance(devices, int):
+        devices = [devices]
+    if ng == 0 and (cfg.get("gpu") is True or gcfg):
+        ng = len(devices) if devices else 1
+    if ng > 0:
+        gpu_flags, gpu_mode = _gpu_flags(req, exe, ng)
+        try:
+            np_ = int(cfg.get("np") or 0)
+        except (TypeError, ValueError):
+            np_ = 0
+        if np_ <= 0:
+            try:
+                np_ = max(1, int(gcfg.get("ranks_per_gpu") or 1)) * ng
+            except (TypeError, ValueError):
+                np_ = ng
+        threads = max(1, ncpu // np_)
+        env = dict(os.environ, OMP_NUM_THREADS=str(threads))
+        if devices and "CUDA_VISIBLE_DEVICES" not in os.environ:
+            env["CUDA_VISIBLE_DEVICES"] = ",".join(str(d) for d in devices)
+        if np_ == 1:
+            return base + gpu_flags, env, gpu_mode
+        launcher = shutil.which(cfg.get("launcher") or "mpirun")
+        if not launcher:
+            return base + gpu_flags, env, f"{gpu_mode} (mpirun not found)"
+        return [launcher, "-np", str(np_)] + base + gpu_flags, env, \
+            f"mpi x{np_} + {gpu_mode}"
+
+    if ncpu == 1:
         return base, None, "serial"
     if cfg.get("mpi") is False:
-        env = dict(os.environ, OMP_NUM_THREADS=str(np_))
-        return base + ["-sf", "omp"], env, f"openmp x{np_}"
+        env = dict(os.environ, OMP_NUM_THREADS=str(ncpu))
+        return base + ["-sf", "omp"], env, f"openmp x{ncpu}"
     launcher = shutil.which(cfg.get("launcher") or "mpirun")
     if not launcher:
-        return base, None, f"serial (mpirun not found, requested np={np_})"
-    return [launcher, "-np", str(np_)] + base, None, f"mpi x{np_}"
+        return base, None, f"serial (mpirun not found, requested np={ncpu})"
+    return [launcher, "-np", str(ncpu)] + base, None, f"mpi x{ncpu}"
 
 
 def _run_lammps(ctx, deck_lines, has_trajectory):
@@ -446,12 +568,20 @@ def _run_lammps(ctx, deck_lines, has_trajectory):
                               env=env, timeout=24 * 3600)
     log_path = ctx.workdir / "log.lammps"
     log_text = log_path.read_text(errors="replace") if log_path.is_file() else ""
-    _classify_failure(proc.returncode, log_text)
+    # stderr (merged into stdout.log) carries errors that never reach
+    # log.lammps — e.g. Kokkos CUDA init failures abort before the log opens
+    stdout_path = ctx.workdir / "stdout.log"
+    stderr_tail = ""
+    if stdout_path.is_file():
+        stderr_tail = "\n".join(
+            stdout_path.read_text(errors="replace").splitlines()[-40:])
+    _classify_failure(proc.returncode, log_text, stderr_tail)
     return log_text
 
 
-def _classify_failure(returncode, log_text):
+def _classify_failure(returncode, log_text, stderr_tail=""):
     tail = "\n".join(log_text.splitlines()[-40:])
+    combined = log_text + "\n" + stderr_tail
     if "Lost atoms" in log_text:
         raise ProviderFailure("lost_atoms", "execution_error",
                               "LAMMPS lost atoms during the run",
@@ -464,6 +594,14 @@ def _classify_failure(returncode, log_text):
         raise ProviderFailure("energy_blowup", "execution_error",
                               "energy blowup / topology corruption",
                               recoverable=False, raw_log=tail)
+    if re.search(r"without (GPU|KOKKOS) package installed|"
+                 r"cudaError|CUDA driver|cuInit|Could not (find|open).*GPU|"
+                 r"no GPU(s)? (found|present|detected)", combined, re.I):
+        raise ProviderFailure(
+            "gpu_backend_unavailable", "environment_error",
+            "requested GPU backend unavailable (package not compiled in, or "
+            "no usable GPU/driver on this host)",
+            recoverable=False, raw_log=tail or stderr_tail)
     if "Total wall time" not in log_text:
         m = re.search(r"ERROR:?\s*(.+)", tail)
         msg = m.group(1) if m else f"exit code {returncode}, no completion marker"
