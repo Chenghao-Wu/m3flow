@@ -1,13 +1,20 @@
-//! Spec registry: TaskSpec / WorkflowSpec loading, schema validation, and
-//! version resolution (plan §52).
+//! Spec registry: TaskSpec / WorkflowSpec / type-pack loading, schema
+//! validation, and version resolution (plan §52).
 //!
 //! Sources, lowest precedence first:
 //!   1. the builtin library embedded in the binary (`tasks/`, `workflows/`)
-//!   2. project registries (`tasks/`, `workflows/` under the project root,
-//!      plus paths declared in `m3flow.yaml`)
+//!   2. project registries (`types/`, `tasks/`, `workflows/` under the project
+//!      root, plus paths declared in `m3flow.yaml`)
+//!
 //! Same `name@version` in a later source replaces the earlier entry.
+//! Artifact types behave differently: `types/v1` packs may only add new
+//! types under an existing parent — redefining a known type is an error
+//! (type names live inside artifact records and provenance chains).
+//! Within each source, type packs register before specs, so a spec may
+//! reference a type its own batch defines.
 
 use include_dir::{include_dir, Dir};
+use m3flow_core::atypes::TypeSet;
 use m3flow_core::error::{M3FlowError, Result};
 use m3flow_core::specs::{parse_ref, TaskSpec, WorkflowSpec};
 use semver::Version;
@@ -18,12 +25,17 @@ static BUILTIN_TASKS: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../tasks");
 static BUILTIN_WORKFLOWS: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../workflows");
 static SCHEMAS: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../schemas");
 
+/// One parsed registry document plus its origin (path or "<builtin>/...").
+type Doc = (serde_json::Value, String);
+
 #[derive(Debug, Default)]
 pub struct Registry {
     tasks: BTreeMap<String, BTreeMap<Version, TaskSpec>>,
     workflows: BTreeMap<String, BTreeMap<Version, WorkflowSpec>>,
     /// source path (or "<builtin>") per qualified name, for diagnostics
     origins: BTreeMap<String, String>,
+    /// builtin artifact types + any loaded `types/v1` packs
+    types: TypeSet,
 }
 
 impl Registry {
@@ -34,120 +46,117 @@ impl Registry {
     /// Registry with the embedded builtin library loaded.
     pub fn with_builtins() -> Result<Self> {
         let mut r = Self::new();
-        r.load_dir_embedded(&BUILTIN_TASKS, "<builtin>/tasks")?;
-        r.load_dir_embedded(&BUILTIN_WORKFLOWS, "<builtin>/workflows")?;
+        let mut docs = Vec::new();
+        collect_embedded(&BUILTIN_TASKS, "<builtin>/tasks", &mut docs)?;
+        collect_embedded(&BUILTIN_WORKFLOWS, "<builtin>/workflows", &mut docs)?;
+        r.load_docs(docs)?;
         Ok(r)
     }
 
     /// Add project-local registries on top of builtins.
     pub fn with_project(mut self, project_root: &Path, extra: &[PathBuf]) -> Result<Self> {
-        for sub in ["tasks", "workflows"] {
+        let mut docs = Vec::new();
+        for sub in ["types", "tasks", "workflows"] {
             let dir = project_root.join(sub);
             if dir.is_dir() {
-                self.load_dir_fs(&dir)?;
+                collect_fs(&dir, &mut docs)?;
             }
         }
         for dir in extra {
             if dir.is_dir() {
-                self.load_dir_fs(dir)?;
+                collect_fs(dir, &mut docs)?;
             }
         }
+        self.load_docs(docs)?;
         Ok(self)
     }
 
-    fn load_dir_embedded(&mut self, dir: &Dir, origin: &str) -> Result<()> {
-        // Dir::files() is not recursive — walk explicitly.
-        let mut stack: Vec<&Dir> = vec![dir];
-        while let Some(d) = stack.pop() {
-            for sub in d.dirs() {
-                stack.push(sub);
-            }
-            for f in d.files() {
-                let is_yaml = matches!(
-                    f.path().extension().and_then(|e| e.to_str()),
-                    Some("yaml") | Some("yml")
-                );
-                if !is_yaml {
-                    continue;
-                }
-                let text = f
-                    .contents_utf8()
-                    .ok_or_else(|| M3FlowError::internal("builtin spec is not UTF-8"))?;
-                self.load_text(text, &format!("{origin}/{}", f.path().display()))?;
-            }
-        }
-        Ok(())
-    }
-
-    pub fn load_dir_fs(&mut self, dir: &Path) -> Result<()> {
-        let mut stack = vec![dir.to_path_buf()];
-        while let Some(d) = stack.pop() {
-            for entry in std::fs::read_dir(&d)
-                .map_err(|e| M3FlowError::io(e, format!("reading {}", d.display())))?
-            {
-                let p = entry?.path();
-                if p.is_dir() {
-                    stack.push(p);
-                } else if matches!(
-                    p.extension().and_then(|e| e.to_str()),
-                    Some("yaml") | Some("yml")
-                ) {
-                    let text = std::fs::read_to_string(&p)
-                        .map_err(|e| M3FlowError::io(e, format!("reading {}", p.display())))?;
-                    self.load_text(&text, &p.display().to_string())?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Validate + register one spec document (task or workflow, sniffed by `schema:`).
+    /// Validate + register one document (task, workflow, or type pack,
+    /// sniffed by `schema:`). For batches use the dir loaders — they register
+    /// type packs before specs regardless of file order.
     pub fn load_text(&mut self, text: &str, origin: &str) -> Result<()> {
-        let json: serde_json::Value = serde_yaml::from_str(text)
-            .map_err(|e| M3FlowError::schema(format!("{origin}: YAML parse failed: {e}")))?;
-        let schema_tag = json
-            .get("schema")
-            .and_then(|s| s.as_str())
-            .ok_or_else(|| M3FlowError::schema(format!("{origin}: missing 'schema' key")))?;
-        match schema_tag {
-            "task/v1" => {
-                validate_against("task", &json).map_err(|e| prefix_err(origin, e))?;
-                let spec = TaskSpec::from_json(&json).map_err(|e| prefix_err(origin, e))?;
-                self.check_task_types(&spec)
-                    .map_err(|e| prefix_err(origin, e))?;
-                self.register_task(spec, origin);
+        let json = parse_doc(text, origin)?;
+        self.load_docs(vec![(json, origin.to_string())])
+    }
+
+    /// Register a batch of documents in two phases: type packs first, so a
+    /// spec may reference a type its own batch defines.
+    fn load_docs(&mut self, docs: Vec<Doc>) -> Result<()> {
+        for (json, origin) in &docs {
+            if schema_tag(json) == Some("types/v1") {
+                self.load_type_pack(json, origin)?;
             }
-            "workflow/v1" => {
-                validate_against("workflow", &json).map_err(|e| prefix_err(origin, e))?;
-                let spec = WorkflowSpec::from_json(&json).map_err(|e| prefix_err(origin, e))?;
-                self.check_workflow_types(&spec)
-                    .map_err(|e| prefix_err(origin, e))?;
-                self.register_workflow(spec, origin);
-            }
-            other => {
-                return Err(M3FlowError::schema(format!(
-                    "{origin}: unknown schema tag '{other}' (expected task/v1 or workflow/v1)"
-                )))
+        }
+        for (json, origin) in docs {
+            match schema_tag(&json) {
+                Some("types/v1") => {} // registered in phase one
+                Some("task/v1") => {
+                    validate_against("task", &json).map_err(|e| prefix_err(&origin, e))?;
+                    let spec = TaskSpec::from_json(&json).map_err(|e| prefix_err(&origin, e))?;
+                    self.check_task_types(&spec)
+                        .map_err(|e| prefix_err(&origin, e))?;
+                    self.register_task(spec, &origin);
+                }
+                Some("workflow/v1") => {
+                    validate_against("workflow", &json).map_err(|e| prefix_err(&origin, e))?;
+                    let spec =
+                        WorkflowSpec::from_json(&json).map_err(|e| prefix_err(&origin, e))?;
+                    self.check_workflow_types(&spec)
+                        .map_err(|e| prefix_err(&origin, e))?;
+                    self.register_workflow(spec, &origin);
+                }
+                Some(other) => {
+                    return Err(M3FlowError::schema(format!(
+                        "{origin}: unknown schema tag '{other}' (expected task/v1, workflow/v1, or types/v1)"
+                    )))
+                }
+                None => {
+                    return Err(M3FlowError::schema(format!(
+                        "{origin}: missing 'schema' key"
+                    )))
+                }
             }
         }
         Ok(())
+    }
+
+    fn load_type_pack(&mut self, json: &serde_json::Value, origin: &str) -> Result<()> {
+        validate_against("types", json).map_err(|e| prefix_err(origin, e))?;
+        let entries = parse_type_pack(json).map_err(|e| prefix_err(origin, e))?;
+        // add_pack errors already carry the origin
+        self.types.add_pack(&entries, origin)
+    }
+
+    /// The merged artifact-type view: builtins plus loaded packs.
+    pub fn types(&self) -> &TypeSet {
+        &self.types
     }
 
     fn check_task_types(&self, spec: &TaskSpec) -> Result<()> {
         for decl in spec.inputs.values() {
-            ensure_type(&decl.artifact_type, &spec.name)?;
+            self.ensure_type(&decl.artifact_type, &spec.name)?;
         }
         for decl in spec.outputs.values() {
-            ensure_type(&decl.artifact_type, &spec.name)?;
+            self.ensure_type(&decl.artifact_type, &spec.name)?;
         }
         Ok(())
     }
 
     fn check_workflow_types(&self, spec: &WorkflowSpec) -> Result<()> {
         for decl in spec.inputs.values() {
-            ensure_type(&decl.artifact_type, &spec.name)?;
+            self.ensure_type(&decl.artifact_type, &spec.name)?;
         }
         Ok(())
+    }
+
+    fn ensure_type(&self, t: &str, owner: &str) -> Result<()> {
+        if self.types.is_known_type(t) {
+            Ok(())
+        } else {
+            Err(M3FlowError::schema(format!(
+                "'{owner}' references unknown artifact type '{t}' (see `m3flow schema list`)"
+            )))
+        }
     }
 
     fn register_task(&mut self, spec: TaskSpec, origin: &str) {
@@ -240,14 +249,79 @@ impl Registry {
     }
 }
 
-fn ensure_type(t: &str, owner: &str) -> Result<()> {
-    if m3flow_core::atypes::is_known_type(t) {
-        Ok(())
-    } else {
-        Err(M3FlowError::schema(format!(
-            "'{owner}' references unknown artifact type '{t}' (see `m3flow schema list`)"
-        )))
+fn schema_tag(json: &serde_json::Value) -> Option<&str> {
+    json.get("schema").and_then(|s| s.as_str())
+}
+
+fn parse_doc(text: &str, origin: &str) -> Result<serde_json::Value> {
+    serde_yaml::from_str(text)
+        .map_err(|e| M3FlowError::schema(format!("{origin}: YAML parse failed: {e}")))
+}
+
+fn is_yaml_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("yaml") | Some("yml")
+    )
+}
+
+fn collect_embedded(dir: &Dir, origin: &str, out: &mut Vec<Doc>) -> Result<()> {
+    // Dir::files() is not recursive — walk explicitly.
+    let mut stack: Vec<&Dir> = vec![dir];
+    while let Some(d) = stack.pop() {
+        for sub in d.dirs() {
+            stack.push(sub);
+        }
+        for f in d.files() {
+            if !is_yaml_file(f.path()) {
+                continue;
+            }
+            let text = f
+                .contents_utf8()
+                .ok_or_else(|| M3FlowError::internal("builtin spec is not UTF-8"))?;
+            let origin = format!("{origin}/{}", f.path().display());
+            out.push((parse_doc(text, &origin)?, origin));
+        }
     }
+    Ok(())
+}
+
+fn collect_fs(dir: &Path, out: &mut Vec<Doc>) -> Result<()> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d)
+            .map_err(|e| M3FlowError::io(e, format!("reading {}", d.display())))?
+        {
+            let p = entry?.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if is_yaml_file(&p) {
+                let origin = p.display().to_string();
+                let text = std::fs::read_to_string(&p)
+                    .map_err(|e| M3FlowError::io(e, format!("reading {}", p.display())))?;
+                out.push((parse_doc(&text, &origin)?, origin));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse the `types:` mapping of a `types/v1` pack into (name, parent) pairs.
+fn parse_type_pack(json: &serde_json::Value) -> Result<Vec<(String, String)>> {
+    let map = json
+        .get("types")
+        .and_then(|t| t.as_object())
+        .ok_or_else(|| M3FlowError::schema("types/v1: missing 'types' mapping".to_string()))?;
+    let mut out = Vec::new();
+    for (name, parent) in map {
+        let p = parent.as_str().ok_or_else(|| {
+            M3FlowError::schema(format!(
+                "types/v1: parent of '{name}' must be a type name string"
+            ))
+        })?;
+        out.push((name.clone(), p.to_string()));
+    }
+    Ok(out)
 }
 
 fn pick_version<'a, T>(
@@ -324,4 +398,103 @@ pub fn schema_text(name: &str) -> Option<String> {
         .get_file(format!("{name}.schema.json"))
         .and_then(|f| f.contents_utf8())
         .map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PACK: &str = r#"
+schema: types/v1
+pack: widget
+types:
+  WidgetSystem: System
+  WidgetResult: Result
+"#;
+
+    fn task_doc(input_type: &str, output_type: &str) -> String {
+        format!(
+            r#"
+schema: task/v1
+name: use_widget
+version: 1.0.0
+description: test task
+category: analysis
+inputs:
+  sys:
+    type: {input_type}
+parameters: {{}}
+outputs:
+  out:
+    type: {output_type}
+"#
+        )
+    }
+
+    #[test]
+    fn pack_then_task_registers_new_types() {
+        let mut reg = Registry::with_builtins().unwrap();
+        reg.load_text(PACK, "widget/types.yaml").unwrap();
+        reg.load_text(
+            &task_doc("WidgetSystem", "WidgetResult"),
+            "widget/task.yaml",
+        )
+        .unwrap();
+        assert!(reg.types().is_known_type("WidgetSystem"));
+        assert!(reg.types().is_subtype("WidgetSystem", "System"));
+    }
+
+    #[test]
+    fn task_referencing_pack_type_without_pack_fails() {
+        let mut reg = Registry::with_builtins().unwrap();
+        let e = reg
+            .load_text(&task_doc("WidgetSystem", "WidgetResult"), "task.yaml")
+            .unwrap_err();
+        assert!(e
+            .to_string()
+            .contains("unknown artifact type 'WidgetSystem'"));
+    }
+
+    #[test]
+    fn two_phase_load_order_independent() {
+        // task doc appears BEFORE the pack that defines its types
+        let docs = vec![
+            (
+                parse_doc(&task_doc("WidgetSystem", "WidgetResult"), "task.yaml").unwrap(),
+                "task.yaml".to_string(),
+            ),
+            (
+                parse_doc(PACK, "types.yaml").unwrap(),
+                "types.yaml".to_string(),
+            ),
+        ];
+        let mut reg = Registry::with_builtins().unwrap();
+        reg.load_docs(docs).unwrap();
+        assert!(reg.task("use_widget").is_ok());
+    }
+
+    #[test]
+    fn duplicate_type_across_packs_fails() {
+        let mut reg = Registry::with_builtins().unwrap();
+        reg.load_text(PACK, "a/types.yaml").unwrap();
+        let e = reg.load_text(PACK, "b/types.yaml").unwrap_err();
+        assert!(e.to_string().contains("already defined by a/types.yaml"));
+    }
+
+    #[test]
+    fn pack_with_unknown_parent_fails() {
+        let mut reg = Registry::with_builtins().unwrap();
+        let bad = "schema: types/v1\ntypes:\n  Orphan: NoSuchType\n";
+        let e = reg.load_text(bad, "bad.yaml").unwrap_err();
+        assert!(e.to_string().contains("unresolvable parent types"));
+    }
+
+    #[test]
+    fn builtin_types_unchanged_without_packs() {
+        let reg = Registry::with_builtins().unwrap();
+        assert!(reg.types().is_subtype("EquilibratedState", "State"));
+        assert!(!reg.types().is_known_type("WidgetSystem"));
+        // 28 builtin types + root
+        assert_eq!(reg.types().all_types().len(), 29);
+    }
 }

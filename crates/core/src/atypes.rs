@@ -4,10 +4,17 @@
 //! user-authored inputs (so provenance chains can start at a SystemSpec) and
 //! the open root `Artifact`. Compatibility is nominal subtyping: a value of a
 //! subtype is accepted wherever a supertype is required.
+//!
+//! The compiled-in table below is the standard library; it is frozen per
+//! release (a type that ships builtin stays builtin — moving one to a pack
+//! would break existing projects). Projects extend the hierarchy
+//! declaratively with `types/v1` pack documents (see the registry crate);
+//! extension entries may only attach under an already-known parent, so the
+//! tree grows downward and cycles are impossible by construction.
 
+use crate::error::{M3FlowError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -20,7 +27,7 @@ pub enum Family {
     Root,
 }
 
-/// parent-of table; every type has exactly one parent (tree).
+/// builtin parent-of table; every type has exactly one parent (tree).
 const HIERARCHY: &[(&str, &str)] = &[
     ("Spec", "Artifact"),
     ("SystemSpec", "Spec"),
@@ -52,54 +59,176 @@ const HIERARCHY: &[(&str, &str)] = &[
     ("EquilibrationReport", "Result"),
 ];
 
-fn parent_map() -> &'static HashMap<&'static str, &'static str> {
-    static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-    MAP.get_or_init(|| HIERARCHY.iter().copied().collect())
+#[derive(Debug, Clone)]
+struct TypeInfo {
+    parent: String,
+    /// where the type was defined ("<builtin>" or a pack origin), for diagnostics
+    origin: String,
 }
 
-pub fn is_known_type(t: &str) -> bool {
-    t == "Artifact" || parent_map().contains_key(t)
+/// A merged view of the builtin hierarchy plus any extension packs.
+///
+/// Queries are pure tree walks; adding extension nodes never changes the
+/// answer for a pair of builtin types (their ancestry passes only through
+/// builtin parents).
+#[derive(Debug, Clone)]
+pub struct TypeSet {
+    /// name -> info; `Artifact` is the implicit root (not stored)
+    types: HashMap<String, TypeInfo>,
+    /// registration order, for deterministic `schema list` output
+    order: Vec<String>,
 }
 
-/// Immediate parent in the type hierarchy (None for the root).
-pub fn parent_of(t: &str) -> Option<&'static str> {
-    parent_map().get(t).copied()
+impl Default for TypeSet {
+    fn default() -> Self {
+        Self::builtins()
+    }
 }
 
-/// True if `have` can be used where `want` is required (have ≤ want).
-pub fn is_subtype(have: &str, want: &str) -> bool {
-    let mut cur = have;
-    loop {
-        if cur == want {
-            return true;
+impl TypeSet {
+    /// The compiled-in standard library, no extensions.
+    pub fn builtins() -> Self {
+        let mut ts = Self {
+            types: HashMap::new(),
+            order: Vec::new(),
+        };
+        for (name, parent) in HIERARCHY {
+            ts.types.insert(
+                name.to_string(),
+                TypeInfo {
+                    parent: parent.to_string(),
+                    origin: "<builtin>".to_string(),
+                },
+            );
+            ts.order.push(name.to_string());
         }
-        match parent_map().get(cur) {
-            Some(p) => cur = p,
-            None => return false,
+        ts
+    }
+
+    pub fn is_known_type(&self, t: &str) -> bool {
+        t == "Artifact" || self.types.contains_key(t)
+    }
+
+    /// Immediate parent in the type hierarchy (None for the root/unknown).
+    pub fn parent_of(&self, t: &str) -> Option<&str> {
+        self.types.get(t).map(|i| i.parent.as_str())
+    }
+
+    /// Where a type was defined (`<builtin>` or a pack origin).
+    pub fn origin_of(&self, t: &str) -> Option<&str> {
+        self.types.get(t).map(|i| i.origin.as_str())
+    }
+
+    /// True if `have` can be used where `want` is required (have ≤ want).
+    pub fn is_subtype(&self, have: &str, want: &str) -> bool {
+        let mut cur = have;
+        loop {
+            if cur == want {
+                return true;
+            }
+            match self.types.get(cur) {
+                Some(i) => cur = i.parent.as_str(),
+                None => return false,
+            }
+        }
+    }
+
+    pub fn family_of(&self, t: &str) -> Family {
+        for (fam, f) in [
+            (Family::Spec, "Spec"),
+            (Family::System, "System"),
+            (Family::State, "State"),
+            (Family::Dataset, "Dataset"),
+            (Family::Result, "Result"),
+        ] {
+            if self.is_subtype(t, f) {
+                return fam;
+            }
+        }
+        Family::Root
+    }
+
+    /// All registered type names, root first, in registration order
+    /// (for `schema list`/docs).
+    pub fn all_types(&self) -> Vec<&str> {
+        let mut v = vec!["Artifact"];
+        v.extend(self.order.iter().map(|s| s.as_str()));
+        v
+    }
+
+    /// Register one extension type. The parent must already be known — the
+    /// tree only grows downward, so cycles cannot form. Type names are global
+    /// identifiers inside artifact records and provenance chains, so
+    /// redefinition is a hard error, never an override.
+    pub fn add(&mut self, name: &str, parent: &str, origin: &str) -> Result<()> {
+        if !valid_type_name(name) {
+            return Err(M3FlowError::schema(format!(
+                "{origin}: invalid type name '{name}' (want [A-Z][A-Za-z0-9]*)"
+            )));
+        }
+        if self.is_known_type(name) {
+            let existing = self.origin_of(name).unwrap_or("<root>");
+            return Err(M3FlowError::schema(format!(
+                "{origin}: type '{name}' is already defined by {existing} (types cannot be redefined)"
+            )));
+        }
+        if !self.is_known_type(parent) {
+            return Err(M3FlowError::schema(format!(
+                "{origin}: parent '{parent}' of '{name}' is not a known type"
+            )));
+        }
+        self.types.insert(
+            name.to_string(),
+            TypeInfo {
+                parent: parent.to_string(),
+                origin: origin.to_string(),
+            },
+        );
+        self.order.push(name.to_string());
+        Ok(())
+    }
+
+    /// Register a pack's entries regardless of declaration order: intra-pack
+    /// parent chains (e.g. `LabeledStructureSet <: StructureSet` appearing
+    /// alphabetically before its parent) resolve by fixpoint. An entry whose
+    /// parent no entry provides and no prior type defines is an error.
+    pub fn add_pack(&mut self, entries: &[(String, String)], origin: &str) -> Result<()> {
+        let mut pending: Vec<&(String, String)> = entries.iter().collect();
+        loop {
+            let mut progress = false;
+            let mut i = 0;
+            while i < pending.len() {
+                let (name, parent) = &pending[i];
+                if self.is_known_type(parent) {
+                    self.add(name, parent, origin)?;
+                    pending.remove(i);
+                    progress = true;
+                } else {
+                    i += 1;
+                }
+            }
+            if pending.is_empty() {
+                return Ok(());
+            }
+            if !progress {
+                let stuck: Vec<String> = pending
+                    .iter()
+                    .map(|(n, p)| format!("{n} (parent {p})"))
+                    .collect();
+                return Err(M3FlowError::schema(format!(
+                    "{origin}: unresolvable parent types: {}",
+                    stuck.join(", ")
+                )));
+            }
         }
     }
 }
 
-pub fn family_of(t: &str) -> Family {
-    for (fam, f) in [
-        (Family::Spec, "Spec"),
-        (Family::System, "System"),
-        (Family::State, "State"),
-        (Family::Dataset, "Dataset"),
-        (Family::Result, "Result"),
-    ] {
-        if is_subtype(t, f) {
-            return fam;
-        }
-    }
-    Family::Root
-}
-
-/// All registered type names, root first (for `schema list`/docs).
-pub fn all_types() -> Vec<&'static str> {
-    let mut v = vec!["Artifact"];
-    v.extend(parent_map().keys().copied());
-    v
+/// Type names are flat CamelCase identifiers: `[A-Z][A-Za-z0-9]*`.
+fn valid_type_name(n: &str) -> bool {
+    let mut chars = n.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_uppercase())
+        && chars.all(|c| c.is_ascii_alphanumeric())
 }
 
 #[cfg(test)]
@@ -108,21 +237,110 @@ mod tests {
 
     #[test]
     fn subtyping() {
-        assert!(is_subtype("EquilibratedState", "SimulationState"));
-        assert!(is_subtype("EquilibratedState", "State"));
-        assert!(is_subtype("EquilibratedState", "Artifact"));
-        assert!(is_subtype("ProductionTrajectory", "Trajectory"));
-        assert!(is_subtype("TemperatureSeries", "ThermodynamicSeries"));
-        assert!(!is_subtype("SimulationState", "EquilibratedState"));
-        assert!(!is_subtype("Trajectory", "Result"));
-        assert!(!is_subtype("Bogus", "Artifact"));
+        let ts = TypeSet::builtins();
+        assert!(ts.is_subtype("EquilibratedState", "SimulationState"));
+        assert!(ts.is_subtype("EquilibratedState", "State"));
+        assert!(ts.is_subtype("EquilibratedState", "Artifact"));
+        assert!(ts.is_subtype("ProductionTrajectory", "Trajectory"));
+        assert!(ts.is_subtype("TemperatureSeries", "ThermodynamicSeries"));
+        assert!(!ts.is_subtype("SimulationState", "EquilibratedState"));
+        assert!(!ts.is_subtype("Trajectory", "Result"));
+        assert!(!ts.is_subtype("Bogus", "Artifact"));
     }
 
     #[test]
     fn families() {
-        assert_eq!(family_of("EquilibratedState"), Family::State);
-        assert_eq!(family_of("DensityResult"), Family::Result);
-        assert_eq!(family_of("SystemSpec"), Family::Spec);
-        assert_eq!(family_of("SimulationSystem"), Family::System);
+        let ts = TypeSet::builtins();
+        assert_eq!(ts.family_of("EquilibratedState"), Family::State);
+        assert_eq!(ts.family_of("DensityResult"), Family::Result);
+        assert_eq!(ts.family_of("SystemSpec"), Family::Spec);
+        assert_eq!(ts.family_of("SimulationSystem"), Family::System);
+    }
+
+    fn atomicsim_entries() -> Vec<(String, String)> {
+        // deliberately declaration-ordered child-before-parent in one spot
+        vec![
+            ("AtomicStructure".into(), "System".into()),
+            ("LabeledStructureSet".into(), "StructureSet".into()),
+            ("StructureSet".into(), "Dataset".into()),
+            ("RelaxedStructure".into(), "AtomicStructure".into()),
+            ("RelaxationResult".into(), "Result".into()),
+        ]
+    }
+
+    #[test]
+    fn pack_entries_resolve_out_of_order() {
+        let mut ts = TypeSet::builtins();
+        ts.add_pack(&atomicsim_entries(), "test-pack").unwrap();
+        assert!(ts.is_subtype("RelaxedStructure", "AtomicStructure"));
+        assert!(ts.is_subtype("RelaxedStructure", "System"));
+        assert!(ts.is_subtype("RelaxedStructure", "Artifact"));
+        assert!(ts.is_subtype("LabeledStructureSet", "Dataset"));
+        assert_eq!(ts.family_of("RelaxedStructure"), Family::System);
+        assert_eq!(ts.family_of("RelaxationResult"), Family::Result);
+        assert_eq!(ts.parent_of("StructureSet"), Some("Dataset"));
+        assert_eq!(ts.origin_of("StructureSet"), Some("test-pack"));
+    }
+
+    #[test]
+    fn extension_never_changes_builtin_answers() {
+        let base = TypeSet::builtins();
+        let mut ext = base.clone();
+        ext.add_pack(&atomicsim_entries(), "test-pack").unwrap();
+        for have in base.all_types() {
+            for want in base.all_types() {
+                assert_eq!(
+                    base.is_subtype(have, want),
+                    ext.is_subtype(have, want),
+                    "{have} <: {want} changed after pack load"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn redefinition_is_an_error() {
+        let mut ts = TypeSet::builtins();
+        let e = ts.add("DensityResult", "Result", "evil-pack").unwrap_err();
+        assert!(e.to_string().contains("already defined by <builtin>"));
+        ts.add_pack(&atomicsim_entries(), "test-pack").unwrap();
+        let e = ts.add("StructureSet", "Dataset", "other-pack").unwrap_err();
+        assert!(e.to_string().contains("already defined by test-pack"));
+    }
+
+    #[test]
+    fn unknown_parent_is_an_error() {
+        let mut ts = TypeSet::builtins();
+        let entries = vec![("Orphan".to_string(), "NoSuchParent".to_string())];
+        let e = ts.add_pack(&entries, "bad-pack").unwrap_err();
+        assert!(e.to_string().contains("unresolvable parent types"));
+        assert!(e.to_string().contains("Orphan (parent NoSuchParent)"));
+    }
+
+    #[test]
+    fn invalid_names_rejected() {
+        let mut ts = TypeSet::builtins();
+        for bad in [
+            "relaxedStructure",
+            "Relaxed Structure",
+            "Relaxed-Structure",
+            "",
+        ] {
+            assert!(ts.add(bad, "System", "test").is_err(), "'{bad}' accepted");
+        }
+        for good in ["WidgetResult", "X9", "X"] {
+            assert!(ts.add(good, "Result", "test").is_ok(), "'{good}' rejected");
+        }
+    }
+
+    #[test]
+    fn all_types_is_deterministic() {
+        let ts_a = TypeSet::builtins();
+        let ts_b = TypeSet::builtins();
+        let a = ts_a.all_types();
+        let b = ts_b.all_types();
+        assert_eq!(a, b);
+        assert_eq!(a[0], "Artifact");
+        assert_eq!(a.len(), HIERARCHY.len() + 1);
     }
 }

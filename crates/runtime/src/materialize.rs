@@ -318,8 +318,7 @@ pub fn write_run_json(
     let dir = run_dir(&project.root, run);
     // The dir normally exists already (created by materialize_run_inputs or a
     // step materialization) — but a run with no inputs reaches here first.
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| M3FlowError::io(e, "creating run results dir"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| M3FlowError::io(e, "creating run results dir"))?;
     std::fs::write(dir.join("run.json"), text)
         .map_err(|e| M3FlowError::io(e, "writing run.json"))?;
     Ok(())

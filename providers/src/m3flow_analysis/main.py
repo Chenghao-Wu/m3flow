@@ -16,7 +16,7 @@ import numpy as np
 
 from m3flow_provider import (Provider, ProviderFailure, artifact, verdict)
 
-PROVIDER_VERSION = "0.3.2"
+PROVIDER_VERSION = "0.4.0-atomicsim.1"
 
 
 def _engine():
@@ -523,6 +523,128 @@ def fit_modulus(req):
 
 # ------------------------------------------------------------------ plumbing
 
+
+
+def compute_species_msd(req):
+    """Species-resolved MSD from an extxyz trajectory (mlip provider format).
+
+    v1 supports trajectories written as unwrapped extxyz frame series plus a
+    topology structure file (cif). LAMMPS dcd inputs are rejected with a
+    structured error.
+    """
+    from ase.io import read as ase_read
+
+    traj_inp = req["inputs"]["trajectory"]
+    meta = traj_inp.get("metadata") or {}
+    files = traj_inp["files"]
+    fmt = meta.get("format")
+    if fmt != "extxyz" or "extxyz" not in files:
+        raise ProviderFailure(
+            "input_invalid", "input_error",
+            "compute_species_msd v1 requires an extxyz Trajectory "
+            "(metadata.format == 'extxyz'); got format=%r" % fmt)
+    specie = req["parameters"].get("specie")
+    if not specie:
+        raise ProviderFailure("input_invalid", "input_error",
+                              "parameter 'specie' is required")
+    max_lag_frac = float(req["parameters"].get("max_lag_fraction") or 0.5)
+    frame_dt_fs = float(meta.get("frame_interval_fs") or 1.0)
+
+    frames = ase_read(files["extxyz"], index=":")
+    if not frames:
+        raise ProviderFailure("engine_crash", "engine_error",
+                              "extxyz trajectory has no frames")
+    symbols = frames[0].get_chemical_symbols()
+    idx = [i for i, s in enumerate(symbols) if s == specie]
+    if not idx:
+        raise ProviderFailure(
+            "input_invalid", "input_error",
+            f"specie '{specie}' not present; available: {sorted(set(symbols))}")
+    arr = np.array([f.get_positions()[idx] for f in frames], dtype=float)
+    n_frames = arr.shape[0]
+    max_lag = max(1, int(n_frames * max_lag_frac))
+    lags, msd = [], []
+    for lag in range(1, max_lag + 1):
+        d = arr[lag:] - arr[:-lag]
+        lags.append(lag * frame_dt_fs)
+        msd.append(float((d ** 2).sum(-1).mean()))
+    payload = {"lag_fs": lags, "msd": msd, "unit": "angstrom2",
+               "specie": specie, "n_species_atoms": len(idx),
+               "n_frames": int(n_frames)}
+    art = _result(req, "MSDResult", payload)
+    art["metadata"] = {"specie": specie}
+    if meta.get("temperature_K") is not None:
+        art["metadata"]["temperature_K"] = float(meta["temperature_K"])
+    with open("msd.csv", "w") as f:
+        f.write("lag_fs,msd\n")
+        for l, m in zip(lags, msd):
+            f.write(f"{l:.1f},{m:.6f}\n")
+    art["files"]["csv"] = "msd.csv"
+    return {"outputs": {"result": art},
+            "validation": [verdict("trajectory_readable", True),
+                           verdict("no_nan", bool(np.isfinite(msd).all()))]}
+
+
+def fit_arrhenius(req):
+    """Per-temperature Einstein fits over fanned-in MSDResults, then Arrhenius."""
+    series = req["inputs"]["msd_series"]
+    if not isinstance(series, list):
+        series = [series]
+    p = req["parameters"]
+    f0 = float(p.get("fit_start_fraction") or 0.2)
+    f1 = float(p.get("fit_end_fraction") or 0.8)
+    min_points = int(p.get("min_points") or 4)
+    KB_EV = 8.617333262e-5  # eV/K
+
+    points = []
+    for art in series:
+        data = art.get("data") or {}
+        meta = art.get("metadata") or {}
+        temp = meta.get("temperature_K")
+        if temp is None or "lag_fs" not in data:
+            raise ProviderFailure(
+                "input_invalid", "input_error",
+                "each MSDResult needs data.lag_fs/msd and metadata.temperature_K")
+        lag = np.array(data["lag_fs"]); y = np.array(data["msd"])
+        i0, i1 = int(len(lag) * f0), max(int(len(lag) * f1), int(len(lag) * f0) + 2)
+        slope, _ = np.polyfit(lag[i0:i1], y[i0:i1], 1)
+        d_cm2_s = slope / 6.0 * 0.1
+        points.append({"temperature_K": float(temp), "D_cm2_s": float(d_cm2_s)})
+    points.sort(key=lambda x: x["temperature_K"])
+    if len(points) < min_points:
+        raise ProviderFailure(
+            "convergence_failed", "validation_failed",
+            f"need >= {min_points} temperatures, got {len(points)}",
+            recoverable=False)
+    if any(pt["D_cm2_s"] <= 0 for pt in points):
+        raise ProviderFailure(
+            "convergence_failed", "validation_failed",
+            "non-positive diffusivity in series", recoverable=False)
+    inv_t = np.array([1.0 / pt["temperature_K"] for pt in points])
+    ln_d = np.log([pt["D_cm2_s"] for pt in points])
+    slope, intercept = np.polyfit(inv_t, ln_d, 1)
+    pred = slope * inv_t + intercept
+    ss_res = float(((ln_d - pred) ** 2).sum())
+    ss_tot = float(((ln_d - ln_d.mean()) ** 2).sum())
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
+    ea = -slope * KB_EV
+    d0 = float(np.exp(intercept))
+    payload = {"activation_energy": float(ea), "activation_energy_unit": "eV",
+               "d0": d0, "d0_unit": "cm2/s", "r_squared": r2,
+               "diffusivities": points}
+    art = _result(req, "ArrheniusResult", payload)
+    with open("arrhenius.csv", "w") as f:
+        f.write("temperature_K,D_cm2_s\n")
+        for pt in points:
+            f.write(f"{pt['temperature_K']:.1f},{pt['D_cm2_s']:.6e}\n")
+    art["files"]["csv"] = "arrhenius.csv"
+    return {"outputs": {"result": art},
+            "validation": [
+                verdict("enough_temperatures", len(points) >= min_points),
+                verdict("positive_diffusivities",
+                        all(pt["D_cm2_s"] > 0 for pt in points))]}
+
+
 def cli():
     provider = Provider(
         name="analysis",
@@ -542,6 +664,8 @@ def cli():
             "promote_equilibrated_state": promote_equilibrated_state,
             "compute_adhesion": compute_adhesion,
             "fit_modulus": fit_modulus,
+            "compute_species_msd": compute_species_msd,
+            "fit_arrhenius": fit_arrhenius,
         })
     raise SystemExit(provider.cli())
 

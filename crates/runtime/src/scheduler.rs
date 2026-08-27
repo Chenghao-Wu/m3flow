@@ -72,6 +72,7 @@ struct Job {
     store_root: PathBuf,
     expected_validators: Vec<String>,
     cancel_flag: PathBuf,
+    types: m3flow_core::atypes::TypeSet,
 }
 
 enum OutcomeKind {
@@ -685,6 +686,7 @@ fn build_job(
         workdir,
         store_root: ctx.project.artifacts_dir(),
         expected_validators: task.validation.clone(),
+        types: ctx.registry.types().clone(),
     })
 }
 
@@ -786,7 +788,7 @@ fn run_job(job: &Job) -> OutcomeKind {
                 );
             }
             Some(staged) => {
-                if !m3flow_core::atypes::is_subtype(&staged.artifact_type, otype) {
+                if !job.types.is_subtype(&staged.artifact_type, otype) {
                     return failure(
                         "type_check_failed",
                         "protocol_error",

@@ -628,10 +628,7 @@ fn run_cmd(c: RunCmd, json: bool) -> Result<i32> {
                     r["status"].as_str().unwrap_or(""),
                     label
                 );
-                println!(
-                    "{:<30} {:<10} {:<8} OUTPUTS",
-                    "STEP", "STATUS", "ATTEMPTS"
-                );
+                println!("{:<30} {:<10} {:<8} OUTPUTS", "STEP", "STATUS", "ATTEMPTS");
                 for s in v["steps"].as_array().into_iter().flatten() {
                     let outs = s["outputs"].as_object().map(|o| o.len()).unwrap_or(0);
                     println!(
@@ -1001,18 +998,24 @@ fn art_cmd(c: ArtCmd, json: bool) -> Result<i32> {
 fn schema_cmd(c: SchemaCmd, json: bool) -> Result<i32> {
     match c {
         SchemaCmd::List => {
-            let types = m3flow_core::atypes::all_types();
+            let reg = registry()?;
+            let types = reg.types().all_types();
             if json {
                 emit_json(&serde_json::json!({
-                    "document_schemas": ["task", "workflow", "system", "artifact"],
+                    "document_schemas": ["task", "workflow", "system", "artifact", "types"],
                     "artifact_types": types,
                 }));
             } else {
-                println!("document schemas: task, workflow, system, artifact");
+                println!("document schemas: task, workflow, system, artifact, types");
                 println!("artifact types:");
                 for t in types {
-                    let parent = m3flow_core::atypes::parent_of(t).unwrap_or("-");
-                    println!("  {t:<28} <: {parent}");
+                    let parent = reg.types().parent_of(t).unwrap_or("-");
+                    let origin = reg.types().origin_of(t).unwrap_or("<root>");
+                    if origin == "<builtin>" {
+                        println!("  {t:<28} <: {parent}");
+                    } else {
+                        println!("  {t:<28} <: {parent}  [{origin}]");
+                    }
                 }
             }
         }

@@ -7,6 +7,7 @@ use crate::project::Project;
 use crate::scheduler::{self, ResumedNode, RunContext};
 use crate::store::Store;
 use m3flow_core::artifact::{now_rfc3339, RunStatus, TaskStatus};
+use m3flow_core::atypes::TypeSet;
 use m3flow_core::error::{M3FlowError, Result};
 use m3flow_core::id::{ArtifactId, WorkflowRunId};
 use m3flow_registry::Registry;
@@ -101,7 +102,7 @@ pub fn run_workflow(
     let spec = registry.workflow(workflow_ref)?.clone();
     let compiled = Compiler::new(&registry).compile(&spec, &opts.params)?;
 
-    let workflow_inputs = bind_inputs(&compiled, &opts.inputs, &db, &store)?;
+    let workflow_inputs = bind_inputs(&compiled, &opts.inputs, &db, &store, registry.types())?;
     let label = opts.label.as_deref().map(validate_label).transpose()?;
 
     let run = WorkflowRunRecord {
@@ -346,6 +347,7 @@ fn bind_inputs(
     sources: &BTreeMap<String, InputSource>,
     db: &Db,
     store: &Store,
+    types: &TypeSet,
 ) -> Result<BTreeMap<String, ArtifactId>> {
     // reject undeclared input names early
     for name in sources.keys() {
@@ -377,7 +379,7 @@ fn bind_inputs(
                 let parsed = ArtifactId::parse(id)
                     .ok_or_else(|| M3FlowError::schema(format!("malformed artifact id '{id}'")))?;
                 let artifact = db.get_artifact(id)?;
-                if !m3flow_core::atypes::is_subtype(&artifact.artifact_type, &decl.artifact_type) {
+                if !types.is_subtype(&artifact.artifact_type, &decl.artifact_type) {
                     return Err(M3FlowError::ArtifactCompatibility {
                         message: format!(
                             "input '{name}': artifact {} has type {} but the workflow requires {}",
@@ -389,7 +391,7 @@ fn bind_inputs(
                 bound.insert(name.clone(), parsed);
             }
             Some(InputSource::File(path)) => {
-                let id = register_input_file(store, db, path, &decl.artifact_type)?;
+                let id = register_input_file(store, db, path, &decl.artifact_type, types)?;
                 bound.insert(name.clone(), id);
             }
         }
@@ -405,6 +407,7 @@ fn register_input_file(
     db: &Db,
     path: &PathBuf,
     decl_type: &str,
+    types: &TypeSet,
 ) -> Result<ArtifactId> {
     if !path.is_file() {
         return Err(M3FlowError::not_found(format!(
@@ -412,7 +415,7 @@ fn register_input_file(
             path.display()
         )));
     }
-    if m3flow_core::atypes::is_subtype(decl_type, "Spec") {
+    if types.is_subtype(decl_type, "Spec") {
         let text = std::fs::read_to_string(path)
             .map_err(|e| M3FlowError::io(e, format!("reading {}", path.display())))?;
         let json: serde_json::Value = serde_yaml::from_str(&text).map_err(|e| {
@@ -461,7 +464,8 @@ pub fn register_artifact(
     metadata: serde_json::Value,
     data: Option<serde_json::Value>,
 ) -> Result<serde_json::Value> {
-    if !m3flow_core::atypes::is_known_type(artifact_type) {
+    let registry = open_registry(project)?;
+    if !registry.types().is_known_type(artifact_type) {
         return Err(M3FlowError::schema(format!(
             "unknown artifact type '{artifact_type}'"
         )));
@@ -839,7 +843,10 @@ pub fn compatible_json(
     let task = registry.task(task_ref)?;
     let mut matches = Vec::new();
     for (iname, decl) in &task.inputs {
-        if m3flow_core::atypes::is_subtype(&a.artifact_type, &decl.artifact_type) {
+        if registry
+            .types()
+            .is_subtype(&a.artifact_type, &decl.artifact_type)
+        {
             matches.push(serde_json::json!({
                 "input": iname,
                 "declared_type": decl.artifact_type,

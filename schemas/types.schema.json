@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "types.schema.json",
+  "title": "m3flow artifact type pack (types/v1)",
+  "description": "Declarative extension of the artifact type hierarchy. Each entry names a new type and its parent; the parent must be a builtin type or one defined earlier in the merged view. Redefining a known type is an error.",
+  "type": "object",
+  "required": ["schema", "types"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "types/v1"
+    },
+    "pack": {
+      "type": "string",
+      "description": "Pack name for diagnostics, e.g. atomicsim."
+    },
+    "version": {
+      "type": "string",
+      "description": "Pack version (semver recommended)."
+    },
+    "description": {
+      "type": "string"
+    },
+    "types": {
+      "type": "object",
+      "description": "NewTypeName: ParentTypeName. Family is inherited from the parent chain.",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[A-Z][A-Za-z0-9]*$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Za-z0-9]*$"
+      }
+    }
+  }
+}

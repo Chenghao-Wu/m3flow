@@ -253,6 +253,42 @@ Artifact
 `m3flow schema list` prints this from the binary itself; the hierarchy is
 defined in `crates/core/src/atypes.rs`.
 
+### Type packs: extending the hierarchy without touching m3flow
+
+Projects declare additional types in `types/v1` documents — YAML files placed
+in a `types/` directory under the project root (or in any directory listed
+under `registries:` in `m3flow.yaml`):
+
+```yaml
+schema: types/v1
+pack: atomicsim
+version: 0.1.0
+types:
+  AtomicStructure: System          # NewType: ParentType
+  RelaxedStructure: AtomicStructure
+  LabeledStructureSet: StructureSet
+  StructureSet: Dataset
+```
+
+Rules:
+
+- The parent must be a builtin type or one the pack itself defines (any
+  declaration order; intra-pack chains resolve automatically). Cycles are
+  therefore impossible — the tree only grows downward.
+- **Redefining a known type is an error**, never an override — unlike task
+  specs, type names live inside artifact records and provenance chains.
+- Family is inherited from the parent chain (`RelaxedStructure` is a
+  `System`, `LabeledStructureSet` a `Dataset`).
+- Type names match `[A-Z][A-Za-z0-9]*`.
+- Type packs register before specs at load time, so a project's tasks may
+  reference types its own `types/` directory defines.
+- The builtin table is frozen per release: once a type ships builtin it
+  stays builtin.
+
+`m3flow schema list` annotates pack types with their origin file. The JSON
+schema for pack documents is `schemas/types.schema.json` (`m3flow schema
+show types`).
+
 ---
 
 ## 5. Projects and configuration

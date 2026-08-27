@@ -406,7 +406,14 @@ impl<'r> Compiler<'r> {
                     Some(step_id.to_string()),
                 ));
             }
-            check_input_type(&task.name, input_name, decl, &have_type, step_id)?;
+            check_input_type(
+                self.registry.types(),
+                &task.name,
+                input_name,
+                decl,
+                &have_type,
+                step_id,
+            )?;
             match &binding {
                 InputBinding::NodeOutput { node, .. } => {
                     deps.insert(node.clone());
@@ -537,7 +544,14 @@ impl<'r> Compiler<'r> {
             })?;
             let (binding, have) =
                 self.resolve_input_binding(raw, scope, symbols, step_id, iname)?;
-            check_input_type(&child.name, iname, idecl, &have, step_id)?;
+            check_input_type(
+                self.registry.types(),
+                &child.name,
+                iname,
+                idecl,
+                &have,
+                step_id,
+            )?;
             if !idecl.required && raw.is_null() {
                 continue;
             }
@@ -856,13 +870,14 @@ fn bind_outputs(
 }
 
 fn check_input_type(
+    types: &m3flow_core::atypes::TypeSet,
     owner: &str,
     input_name: &str,
     decl: &InputDecl,
     have: &str,
     step_id: &str,
 ) -> Result<()> {
-    if m3flow_core::atypes::is_subtype(have, &decl.artifact_type) {
+    if types.is_subtype(have, &decl.artifact_type) {
         Ok(())
     } else {
         Err(M3FlowError::Type {
