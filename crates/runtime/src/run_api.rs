@@ -67,7 +67,15 @@ pub fn validate_label(label: &str) -> Result<String> {
 // ------------------------------------------------------------------ context
 
 pub fn open_registry(project: &Project) -> Result<Registry> {
-    Registry::with_builtins()?.with_project(&project.root, &project.extra_registry_dirs())
+    let policy = project.extension_policy();
+    Registry::with_builtins()?.with_project(
+        &project.root,
+        &project.extra_registry_dirs(),
+        m3flow_registry::LoadPolicy {
+            types: policy.types_allowed,
+            specs: policy.tasks_allowed,
+        },
+    )
 }
 
 pub fn open_db(project: &Project) -> Result<Db> {

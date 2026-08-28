@@ -27,6 +27,68 @@ pub struct ProjectConfig {
     /// cache keys or fingerprints (same rule as `resources`).
     #[serde(default)]
     pub executor: Option<ExecutorConfig>,
+    /// `development` (default) | `production`. Production locks the
+    /// extension surface: project type packs / task specs are rejected and
+    /// providers must be declared under `providers:` (see `extensions`).
+    #[serde(default)]
+    pub mode: Option<Mode>,
+    /// Per-kind overrides for the extension surface; each wins over `mode`.
+    #[serde(default)]
+    pub extensions: Option<Extensions>,
+}
+
+/// Project mode shorthand. Guardrail against vocabulary drift, not a
+/// security boundary — the config itself is a writable file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Development,
+    Production,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AllowDeny {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderPolicy {
+    /// Any installed provider may be dispatched.
+    Any,
+    /// Only providers declared under `providers:` in m3flow.yaml may run.
+    Pinned,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Extensions {
+    /// `types/v1` packs from the project `types/` dir / `registries:` paths.
+    #[serde(default)]
+    pub types: Option<AllowDeny>,
+    /// `task/v1` + `workflow/v1` specs from project dirs / `registries:`.
+    #[serde(default)]
+    pub tasks: Option<AllowDeny>,
+    #[serde(default)]
+    pub providers: Option<ProviderPolicy>,
+}
+
+/// The extension surface after resolving `mode` + `extensions`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtensionPolicy {
+    pub types_allowed: bool,
+    pub tasks_allowed: bool,
+    pub providers_pinned: bool,
+}
+
+impl ExtensionPolicy {
+    /// Everything allowed — the default outside production mode.
+    pub const PERMISSIVE: Self = Self {
+        types_allowed: true,
+        tasks_allowed: true,
+        providers_pinned: false,
+    };
 }
 
 fn default_schema() -> String {
@@ -106,6 +168,11 @@ pub struct ProviderConfig {
     /// global `executor.type` but not a `--executor` CLI flag.
     #[serde(default)]
     pub executor: Option<ExecutorKind>,
+    /// Version pin: the provider's self-reported version must match exactly.
+    /// Enforced whenever set (any mode); in `providers: pinned` mode an
+    /// entry here is also what makes the provider dispatchable at all.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -176,6 +243,8 @@ impl Project {
             providers: BTreeMap::new(),
             defaults: None,
             executor: None,
+            mode: None,
+            extensions: None,
         };
         let text = serde_yaml::to_string(&cfg)
             .map_err(|e| M3FlowError::internal(format!("yaml encode: {e}")))?;
@@ -219,6 +288,27 @@ impl Project {
 
     pub fn provider_config(&self, name: &str) -> Option<&ProviderConfig> {
         self.config.providers.get(name)
+    }
+
+    /// Effective extension policy: `extensions.<kind>` wins where set,
+    /// otherwise the `mode` default (production locks all three kinds).
+    pub fn extension_policy(&self) -> ExtensionPolicy {
+        let production = matches!(self.config.mode, Some(Mode::Production));
+        let ext = self.config.extensions.as_ref();
+        let allowed = |kind: Option<AllowDeny>| match kind {
+            Some(AllowDeny::Allow) => true,
+            Some(AllowDeny::Deny) => false,
+            None => !production,
+        };
+        ExtensionPolicy {
+            types_allowed: allowed(ext.and_then(|e| e.types)),
+            tasks_allowed: allowed(ext.and_then(|e| e.tasks)),
+            providers_pinned: match ext.and_then(|e| e.providers) {
+                Some(ProviderPolicy::Pinned) => true,
+                Some(ProviderPolicy::Any) => false,
+                None => production,
+            },
+        }
     }
 
     /// Executor for a provider job. Precedence: `--executor` CLI flag >
@@ -301,4 +391,59 @@ pub fn git_context(dir: &Path) -> serde_json::Value {
         "commit": commit,
         "dirty_worktree": dirty,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project_with(yaml: &str) -> Project {
+        let config: ProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        Project {
+            root: PathBuf::from("/nonexistent"),
+            config,
+        }
+    }
+
+    #[test]
+    fn default_is_permissive() {
+        let p = project_with("schema: m3flow-project/v1\n");
+        assert_eq!(p.extension_policy(), ExtensionPolicy::PERMISSIVE);
+    }
+
+    #[test]
+    fn production_locks_everything() {
+        let p = project_with("mode: production\n");
+        let pol = p.extension_policy();
+        assert!(!pol.types_allowed);
+        assert!(!pol.tasks_allowed);
+        assert!(pol.providers_pinned);
+    }
+
+    #[test]
+    fn extensions_override_mode_per_kind() {
+        let p = project_with("mode: production\nextensions:\n  types: allow\n  providers: any\n");
+        let pol = p.extension_policy();
+        assert!(pol.types_allowed); // explicitly re-enabled
+        assert!(!pol.tasks_allowed); // still locked by mode
+        assert!(!pol.providers_pinned); // explicitly re-enabled
+    }
+
+    #[test]
+    fn development_mode_can_deny_selectively() {
+        let p = project_with("extensions:\n  tasks: deny\n");
+        let pol = p.extension_policy();
+        assert!(pol.types_allowed);
+        assert!(!pol.tasks_allowed);
+        assert!(!pol.providers_pinned);
+    }
+
+    #[test]
+    fn provider_version_pin_parses() {
+        let p = project_with("providers:\n  lammps:\n    version: 0.4.0\n");
+        assert_eq!(
+            p.provider_config("lammps").unwrap().version.as_deref(),
+            Some("0.4.0")
+        );
+    }
 }

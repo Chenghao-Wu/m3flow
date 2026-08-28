@@ -211,6 +211,30 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
 
             // provider selection + engine version (cache-key material)
             let provider_name = select_provider(&ctx, &node, &task_spec)?;
+            // production mode: only providers declared in m3flow.yaml may run
+            if ctx.project.extension_policy().providers_pinned
+                && ctx.project.provider_config(&provider_name).is_none()
+            {
+                fail_node_prelaunch(
+                    &ctx,
+                    &mut states,
+                    &node.id,
+                    serde_json::json!({
+                        "error_type": "provider_not_pinned",
+                        "category": "configuration_error",
+                        "recoverable": false,
+                        "message": format!(
+                            "provider '{provider_name}' is not declared under 'providers:' \
+                             in m3flow.yaml (production mode dispatches pinned providers only)"
+                        ),
+                    }),
+                    &format!(
+                        "{}: FAILED (provider '{}' not pinned in m3flow.yaml)",
+                        node.id, provider_name
+                    ),
+                )?;
+                continue;
+            }
             let handle = match providers.entry(provider_name.clone()) {
                 std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
                 std::collections::btree_map::Entry::Vacant(e) => {
@@ -220,28 +244,21 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
                     ) {
                         Ok(h) => e.insert(h),
                         Err(err) => {
-                            {
-                                let st = states.get_mut(&node.id).unwrap();
-                                st.task_run = Some(TaskRunId::new());
-                                st.status = TaskStatus::Failed;
-                            }
-                            persist_task_run(
+                            fail_node_prelaunch(
                                 &ctx,
-                                &states,
+                                &mut states,
                                 &node.id,
-                                TaskStatus::Failed,
-                                Some(serde_json::json!({
+                                serde_json::json!({
                                     "error_type": "engine_missing",
                                     "category": "environment_error",
                                     "recoverable": false,
                                     "message": err.to_string(),
-                                })),
-                                None,
+                                }),
+                                &format!(
+                                    "{}: FAILED (provider '{}' unavailable)",
+                                    node.id, provider_name
+                                ),
                             )?;
-                            ctx.progress(&format!(
-                                "{}: FAILED (provider '{}' unavailable)",
-                                node.id, provider_name
-                            ));
                             continue;
                         }
                     }
@@ -259,6 +276,34 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
                         .map(|s| s.to_string())
                 })
                 .unwrap_or_else(|| "unknown".to_string());
+            // an explicit `version:` pin is enforced in any mode
+            if let Some(pin) = ctx
+                .project
+                .provider_config(&provider_name)
+                .and_then(|c| c.version.as_deref())
+            {
+                if pin != provider_version {
+                    fail_node_prelaunch(
+                        &ctx,
+                        &mut states,
+                        &node.id,
+                        serde_json::json!({
+                            "error_type": "provider_version_mismatch",
+                            "category": "configuration_error",
+                            "recoverable": false,
+                            "message": format!(
+                                "provider '{provider_name}' reports version \
+                                 '{provider_version}' but m3flow.yaml pins '{pin}'"
+                            ),
+                        }),
+                        &format!(
+                            "{}: FAILED (provider '{}' version {} != pinned {})",
+                            node.id, provider_name, provider_version, pin
+                        ),
+                    )?;
+                    continue;
+                }
+            }
             let key = cache_key(
                 &node.task,
                 &format!("{provider_name}@{provider_version}"),
@@ -1163,6 +1208,25 @@ fn collect_input_ids(
         out.insert(name.clone(), ids);
     }
     out
+}
+
+/// Mark a node failed before any job was launched (provider unavailable,
+/// policy violation, version-pin mismatch) and persist the task_run row.
+fn fail_node_prelaunch(
+    ctx: &RunContext,
+    states: &mut BTreeMap<String, NodeState>,
+    node_id: &str,
+    error: serde_json::Value,
+    progress: &str,
+) -> Result<()> {
+    {
+        let st = states.get_mut(node_id).unwrap();
+        st.task_run = Some(TaskRunId::new());
+        st.status = TaskStatus::Failed;
+    }
+    persist_task_run(ctx, states, node_id, TaskStatus::Failed, Some(error), None)?;
+    ctx.progress(progress);
+    Ok(())
 }
 
 fn persist_task_run(

@@ -28,6 +28,27 @@ static SCHEMAS: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../schemas");
 /// One parsed registry document plus its origin (path or "<builtin>/...").
 type Doc = (serde_json::Value, String);
 
+/// What project-level sources may add. Builtins are always loaded; this
+/// gates only docs arriving via `with_project`/`load_text` (a production-
+/// mode project sets kinds to `false`, turning extension into a load error
+/// naming the offending file).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadPolicy {
+    /// `types/v1` packs may register new artifact types.
+    pub types: bool,
+    /// `task/v1` and `workflow/v1` documents may register specs.
+    pub specs: bool,
+}
+
+impl Default for LoadPolicy {
+    fn default() -> Self {
+        Self {
+            types: true,
+            specs: true,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Registry {
     tasks: BTreeMap<String, BTreeMap<Version, TaskSpec>>,
@@ -36,6 +57,8 @@ pub struct Registry {
     origins: BTreeMap<String, String>,
     /// builtin artifact types + any loaded `types/v1` packs
     types: TypeSet,
+    /// gates project-sourced documents (builtins are exempt)
+    policy: LoadPolicy,
 }
 
 impl Registry {
@@ -53,8 +76,17 @@ impl Registry {
         Ok(r)
     }
 
-    /// Add project-local registries on top of builtins.
-    pub fn with_project(mut self, project_root: &Path, extra: &[PathBuf]) -> Result<Self> {
+    /// Add project-local registries on top of builtins, under `policy`.
+    /// A doc whose kind the policy denies is a load error naming the file —
+    /// loud at `open_registry` time rather than a silent skip that surfaces
+    /// later as "unknown task".
+    pub fn with_project(
+        mut self,
+        project_root: &Path,
+        extra: &[PathBuf],
+        policy: LoadPolicy,
+    ) -> Result<Self> {
+        self.policy = policy;
         let mut docs = Vec::new();
         for sub in ["types", "tasks", "workflows"] {
             let dir = project_root.join(sub);
@@ -84,12 +116,24 @@ impl Registry {
     fn load_docs(&mut self, docs: Vec<Doc>) -> Result<()> {
         for (json, origin) in &docs {
             if schema_tag(json) == Some("types/v1") {
+                if !self.policy.types {
+                    return Err(M3FlowError::schema(format!(
+                        "{origin}: type packs are disabled by project policy \
+                         (extensions.types: deny, e.g. mode: production)"
+                    )));
+                }
                 self.load_type_pack(json, origin)?;
             }
         }
         for (json, origin) in docs {
             match schema_tag(&json) {
                 Some("types/v1") => {} // registered in phase one
+                Some("task/v1") | Some("workflow/v1") if !self.policy.specs => {
+                    return Err(M3FlowError::schema(format!(
+                        "{origin}: project task/workflow specs are disabled by project policy \
+                         (extensions.tasks: deny, e.g. mode: production)"
+                    )));
+                }
                 Some("task/v1") => {
                     validate_against("task", &json).map_err(|e| prefix_err(&origin, e))?;
                     let spec = TaskSpec::from_json(&json).map_err(|e| prefix_err(&origin, e))?;
@@ -496,5 +540,45 @@ outputs:
         assert!(!reg.types().is_known_type("WidgetSystem"));
         // 28 builtin types + root
         assert_eq!(reg.types().all_types().len(), 29);
+    }
+
+    fn locked_registry(types: bool, specs: bool) -> Registry {
+        Registry::with_builtins()
+            .unwrap()
+            .with_project(
+                Path::new("/nonexistent-project-root"),
+                &[],
+                LoadPolicy { types, specs },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn policy_denies_type_packs() {
+        let mut reg = locked_registry(false, true);
+        let e = reg.load_text(PACK, "proj/types.yaml").unwrap_err();
+        assert!(e.to_string().contains("type packs are disabled"));
+        // specs still allowed
+        reg.load_text(&task_doc("SystemSpec", "DensityResult"), "t.yaml")
+            .unwrap();
+    }
+
+    #[test]
+    fn policy_denies_specs() {
+        let mut reg = locked_registry(true, false);
+        let e = reg
+            .load_text(&task_doc("SystemSpec", "DensityResult"), "t.yaml")
+            .unwrap_err();
+        assert!(e.to_string().contains("specs are disabled"));
+        // type packs still allowed
+        reg.load_text(PACK, "types.yaml").unwrap();
+    }
+
+    #[test]
+    fn default_policy_allows_everything() {
+        let mut reg = locked_registry(true, true);
+        reg.load_text(PACK, "types.yaml").unwrap();
+        reg.load_text(&task_doc("WidgetSystem", "WidgetResult"), "t.yaml")
+            .unwrap();
     }
 }

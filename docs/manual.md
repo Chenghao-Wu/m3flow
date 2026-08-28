@@ -344,6 +344,53 @@ systems/           workflows/        tasks/         # user-authored specs
 The CLI discovers the project by walking upward from the cwd; outside a
 project, registry commands still work with builtins.
 
+### Production mode: freezing the extension surface
+
+A project in development lets you add artifact types (`types/`), task and
+workflow specs (`tasks/`, `workflows/`, `registries:` paths), and dispatch
+any installed provider. Once a study is producing publishable results you
+usually want that vocabulary frozen — type names and spec versions live
+inside artifact records and provenance chains, so quiet additions or edits
+are a reproducibility hazard. `mode: production` locks all three:
+
+```yaml
+mode: production        # default: development
+```
+
+In production mode:
+
+- Any `types/v1` pack found in project sources is a **load error** naming
+  the file (not a silent skip), as is any project `task/v1`/`workflow/v1`
+  document. Builtin specs and types are unaffected.
+- Only providers declared under `providers:` in `m3flow.yaml` may be
+  dispatched; a workflow step needing an undeclared provider fails with
+  `provider_not_pinned` before anything runs.
+
+Per-kind overrides win over the mode default, e.g. freeze specs but keep
+adding types:
+
+```yaml
+mode: production
+extensions:
+  types: allow            # allow | deny
+  tasks: deny             # covers both tasks/ and workflows/
+  providers: any          # any | pinned
+```
+
+Independently of mode, a provider entry may pin a version; the provider's
+self-reported version (also what joins the cache key) must match exactly,
+else the step fails with `provider_version_mismatch`:
+
+```yaml
+providers:
+  analysis:
+    version: 0.4.0
+```
+
+This is a guardrail against accidental drift, not a security boundary —
+`m3flow.yaml` is a writable project file, and flipping it back to
+`development` is the intended escape hatch.
+
 ---
 
 ## 6. The runtime
