@@ -29,6 +29,9 @@ pub struct StepView {
     pub node_id: String,
     pub status: String,
     pub task_run: Option<String>,
+    /// Fully-resolved task params (defaults applied); null for steps that
+    /// never dispatched or rows predating param persistence.
+    pub params: serde_json::Value,
     pub outputs: BTreeMap<String, String>,
 }
 
@@ -304,11 +307,14 @@ pub fn write_run_json(
             "ended_at": run.ended_at,
         },
         "inputs": inputs,
+        // workflow-level params with user overrides applied (compile-time)
+        "params": run.params,
         "steps": steps.iter().map(|s| serde_json::json!({
             "order": s.order,
             "node_id": s.node_id,
             "status": s.status,
             "task_run": s.task_run,
+            "params": s.params,
             "outputs": s.outputs,
         })).collect::<Vec<_>>(),
         "note": "derived view — truth is the m3flow DB (.m3flow/m3flow.db) and the content-addressed store; rebuild with `m3flow results sync`",
@@ -390,6 +396,7 @@ pub fn sync_run(project: &Project, db: &Db, store: &Store, run_id: &str) -> Resu
             node_id: tr.node_id.clone(),
             status: tr.status.as_str().to_string(),
             task_run: Some(tr.id.to_string()),
+            params: tr.params.clone(),
             outputs: out_map,
         });
     }

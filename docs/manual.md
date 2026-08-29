@@ -516,7 +516,7 @@ project-wide via `defaults: {materialize: {enabled: false}}`):
 
 ```
 results/<group>/<YYYY-MM-DD>_<HH-MM>_<workflow>_<wr_id>/
-  run.json                     run summary + step → artifact map
+  run.json                     run summary, resolved params (workflow + per-step), step → artifact map
   _inputs/<name>/              workflow inputs
   NN_<step>/<ArtifactType>/    symlinks to output files + _artifact.yaml
 ```

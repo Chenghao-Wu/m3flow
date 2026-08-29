@@ -271,6 +271,11 @@ fn resume_impl(
                     status: tr.status,
                     task_run: Some(tr.id.clone()),
                     outputs,
+                    params: if tr.params.is_null() {
+                        None
+                    } else {
+                        Some(tr.params.clone())
+                    },
                 },
             );
         }

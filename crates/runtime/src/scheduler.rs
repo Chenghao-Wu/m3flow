@@ -28,6 +28,9 @@ pub struct ResumedNode {
     pub status: TaskStatus,
     pub task_run: Option<TaskRunId>,
     pub outputs: BTreeMap<String, ArtifactId>,
+    /// Resolved params carried from the previous run's task_run row
+    /// (None when the row predates param persistence).
+    pub params: Option<serde_json::Value>,
 }
 
 /// Everything the scheduler needs; constructed by `run_api`.
@@ -59,6 +62,9 @@ struct NodeState {
     attempts: u32,
     cache_key: Option<String>,
     outputs: BTreeMap<String, ArtifactId>,
+    /// Fully-resolved params (defaults applied), known from dispatch /
+    /// cache-hit on — also what gets persisted to the task_run row.
+    params: Option<serde_json::Value>,
 }
 
 struct Job {
@@ -113,6 +119,7 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
                     attempts: 0,
                     cache_key: None,
                     outputs: resumed.map(|r| r.outputs.clone()).unwrap_or_default(),
+                    params: resumed.and_then(|r| r.params.clone()),
                 },
             )
         })
@@ -331,6 +338,7 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
                 st.status = TaskStatus::Running;
                 st.attempts = attempt;
                 st.task_run = Some(job.task_run_id.clone());
+                st.params = Some(serde_json::Value::Object(resolved.params.clone()));
             }
             persist_task_run(&ctx, &states, &node.id, TaskStatus::Running, None, None)?;
             spawn_job(job, tx.clone());
@@ -976,6 +984,7 @@ fn apply_cache_hit(
         st.status = TaskStatus::Cached;
         st.task_run = Some(tr_id);
         st.outputs = map;
+        st.params = Some(serde_json::Value::Object(resolved.params.clone()));
     }
     if ctx.materialize {
         let arts: Vec<(String, Artifact)> = states[&node.id]
@@ -1011,6 +1020,7 @@ fn step_views(
                 node_id: n.id.clone(),
                 status: st.status.as_str().to_string(),
                 task_run: st.task_run.as_ref().map(|t| t.to_string()),
+                params: st.params.clone().unwrap_or(serde_json::Value::Null),
                 outputs: st
                     .outputs
                     .iter()
@@ -1272,9 +1282,17 @@ fn persist_task_run(
             .as_ref()
             .and_then(|r| r.ended_at.clone())
             .or_else(|| status.is_terminal().then(now_rfc3339)),
-        params: existing
-            .as_ref()
-            .map(|r| r.params.clone())
+        // params: the freshly-resolved values live in NodeState from
+        // dispatch / cache-hit on; otherwise keep whatever the row has
+        // (rows written before param persistence legitimately hold null).
+        params: st
+            .params
+            .clone()
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|r| (!r.params.is_null()).then(|| r.params.clone()))
+            })
             .unwrap_or(serde_json::Value::Null),
         error,
         validation,
