@@ -313,7 +313,9 @@ fn detail_text(app: &App, task: Option<&m3flow_runtime::db::TaskRunRecord>) -> S
             s
         }
         Pane::Logs => {
-            let dir = app.project.runs_dir().join(&app.run_id).join(&t.node_id);
+            let dir = m3flow_runtime::scheduler::latest_attempt_dir(
+                &app.project.runs_dir().join(&app.run_id).join(&t.node_id),
+            );
             let mut s = String::new();
             if let Ok(resp) = std::fs::read_to_string(dir.join("response.json")) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp) {

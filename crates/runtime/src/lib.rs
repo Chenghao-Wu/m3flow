@@ -5,6 +5,7 @@ pub mod compile;
 pub mod db;
 pub mod executor;
 pub mod ir;
+pub mod lease;
 pub mod materialize;
 pub mod project;
 pub mod provider;

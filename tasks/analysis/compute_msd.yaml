@@ -1,7 +1,7 @@
 schema: task/v1
 
 name: compute_msd
-version: 1.0.0
+version: 1.1.0
 
 description: >
   Mean-squared displacement versus lag time from unwrapped coordinates.
@@ -23,7 +23,9 @@ parameters:
   max_lag_fraction:
     type: number
     default: 0.5
-    description: Maximum lag time as a fraction of the trajectory length.
+    description: >
+      Maximum lag time as a fraction of the trajectory length. The time axis
+      is the trajectory's recorded frame interval (fs, or tau for lj).
   com_by_molecule:
     type: boolean
     default: false

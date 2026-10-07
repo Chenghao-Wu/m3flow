@@ -1,7 +1,10 @@
 schema: workflow/v1
 name: adhesion
-version: 1.0.0
-description: Work of adhesion from an interface-relaxation thermodynamic series (interaction-energy column required).
+version: 1.1.0
+description: >
+  Interfacial interaction-energy density -<E_int>/(n A) from an
+  interface-relaxation thermodynamic series (interaction-energy column
+  required). Not the reversible work of adhesion.
 kind: scientific_protocol
 domain: [interface]
 purpose: [adhesion]
@@ -9,6 +12,8 @@ inputs:
   thermo: {type: ThermodynamicSeries, required: true}
 parameters:
   interface_area: {type: area, required: true}
+  n_interfaces: {type: integer, default: 1,
+                 description: "2 for a periodic film-on-slab cell without vacuum."}
   equilibration_fraction: {type: number, default: 0.5}
 steps:
   adhesion:
@@ -16,6 +21,7 @@ steps:
     inputs: {thermo: "${inputs.thermo}"}
     parameters:
       interface_area: "${params.interface_area}"
+      n_interfaces: "${params.n_interfaces}"
       equilibration_fraction: "${params.equilibration_fraction}"
 outputs:
   result: {value: "${adhesion.result}"}

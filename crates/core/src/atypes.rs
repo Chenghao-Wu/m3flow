@@ -59,6 +59,12 @@ const HIERARCHY: &[(&str, &str)] = &[
     ("EquilibrationReport", "Result"),
 ];
 
+/// Certified types and the only task allowed to create them. A certified
+/// artifact (or one of a subtype) may not be registered by hand or emitted
+/// by any other task; the runtime additionally verifies the evidence
+/// binding of each creation.
+pub const PROTECTED_TYPES: &[(&str, &str)] = &[("EquilibratedState", "promote_equilibrated_state")];
+
 #[derive(Debug, Clone)]
 struct TypeInfo {
     parent: String,
@@ -131,6 +137,15 @@ impl TypeSet {
                 None => return false,
             }
         }
+    }
+
+    /// The protected type `t` falls under (itself or an ancestor) and the
+    /// task that alone may create it.
+    pub fn protected(&self, t: &str) -> Option<(&'static str, &'static str)> {
+        PROTECTED_TYPES
+            .iter()
+            .find(|(p, _)| self.is_subtype(t, p))
+            .copied()
     }
 
     pub fn family_of(&self, t: &str) -> Family {
@@ -246,6 +261,19 @@ mod tests {
         assert!(!ts.is_subtype("SimulationState", "EquilibratedState"));
         assert!(!ts.is_subtype("Trajectory", "Result"));
         assert!(!ts.is_subtype("Bogus", "Artifact"));
+    }
+
+    #[test]
+    fn certified_types_are_protected_including_subtypes() {
+        let mut ts = TypeSet::builtins();
+        assert_eq!(
+            ts.protected("EquilibratedState").map(|(_, task)| task),
+            Some("promote_equilibrated_state")
+        );
+        assert!(ts.protected("SimulationState").is_none());
+        ts.add("AnnealedState", "EquilibratedState", "pack")
+            .unwrap();
+        assert!(ts.protected("AnnealedState").is_some());
     }
 
     #[test]

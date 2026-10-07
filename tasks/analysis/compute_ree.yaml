@@ -1,9 +1,13 @@
 schema: task/v1
 
 name: compute_ree
-version: 1.0.0
+version: 1.1.0
 
-description: Mean end-to-end distance of polymer chains over a trajectory.
+description: >
+  Mean end-to-end distance of linear polymer chains over a trajectory.
+  Chain ends come from the bond graph (termini of a linear backbone) or an
+  explicit end selection — never from atom order; non-linear chains need
+  end_selection or backbone_selection.
 
 category: analysis
 
@@ -21,6 +25,21 @@ parameters:
   equilibration_fraction:
     type: number
     default: 0.5
+    description: Fraction of frames discarded from the start; 0 <= f < 1.
+  polymer_selection:
+    type: string
+    description: >
+      MDAnalysis selection of the polymer atoms (default: all). Every
+      bond-connected fragment of the selection is one chain, so mixtures,
+      solvent and substrates must be excluded here.
+  end_selection:
+    type: string
+    description: MDAnalysis selection matching exactly two end atoms per chain.
+  backbone_selection:
+    type: string
+    description: >
+      MDAnalysis selection of backbone atoms; its bonded subgraph must be a
+      linear path per chain (e.g. exclude hydrogens of all-atom chains).
 
 outputs:
   result:

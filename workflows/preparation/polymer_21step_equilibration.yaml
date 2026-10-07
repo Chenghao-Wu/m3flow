@@ -1,7 +1,7 @@
 schema: workflow/v1
 
 name: polymer_21step_equilibration
-version: 1.0.0
+version: 1.1.0
 
 description: >
   Larsen's 21-step compression/decompression equilibration for polymer melts,
@@ -141,6 +141,7 @@ steps:
     inputs:
       thermo: "${s21_npt.thermo}"
       trajectory: "${s21_npt.trajectory}"
+      state: "${s21_npt.state}"
     parameters:
       density_drift_threshold: "${params.density_drift_threshold}"
       stationarity_sigma: "${params.stationarity_sigma}"

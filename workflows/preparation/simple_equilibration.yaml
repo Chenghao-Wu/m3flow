@@ -40,7 +40,7 @@ parameters:
   density_drift_threshold: {type: number, default: 0.01,
                             description: "Gate — max relative density drift over the tail."}
   stationarity_sigma: {type: number, default: 3.0,
-                       description: "Gate — max tail-mean shift, in tail standard deviations."}
+                       description: "Gate — max mean shift / linear trend, in blocked standard errors."}
   tail_fraction: {type: number, default: 0.5,
                   description: "Gate — fraction of the series treated as the tail."}
 
@@ -60,6 +60,7 @@ steps:
     inputs:
       thermo: "${npt.thermo}"
       trajectory: "${npt.trajectory}"
+      state: "${npt.state}"
     parameters:
       density_drift_threshold: "${params.density_drift_threshold}"
       stationarity_sigma: "${params.stationarity_sigma}"

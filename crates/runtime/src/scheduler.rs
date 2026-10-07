@@ -8,12 +8,12 @@
 //! failed dependency become CANCELLED when the run ends.
 
 use crate::db::{Db, TaskRunRecord, WorkflowRunRecord};
-use crate::executor::{self, Executor};
+use crate::executor::{self, CancelToken, Executor};
 use crate::ir::{CompiledWorkflow, InputBinding, IrNode};
 use crate::project::{ExecutorKind, Project};
 use crate::provider::{ExecuteResponse, ProviderHandle};
 use crate::store::Store;
-use m3flow_core::artifact::{now_rfc3339, Artifact, RunStatus, TaskStatus};
+use m3flow_core::artifact::{execution_fingerprint, now_rfc3339, Artifact, RunStatus, TaskStatus};
 use m3flow_core::canon;
 use m3flow_core::error::{M3FlowError, Result};
 use m3flow_core::expr::{eval_condition, Reference};
@@ -52,6 +52,9 @@ pub struct RunContext {
     pub materialize: bool,
     /// `--executor` CLI override (scheduling-only, never fingerprinted).
     pub executor_override: Option<ExecutorKind>,
+    /// Execution generation of this run (1 for the first execution, +1 per
+    /// resume/retry); scopes cancellation requests (see `CancelToken`).
+    pub generation: u64,
     pub progress: Option<Box<dyn Fn(&str) + Send>>,
 }
 
@@ -61,6 +64,8 @@ struct NodeState {
     task_run: Option<TaskRunId>,
     attempts: u32,
     cache_key: Option<String>,
+    /// Engine could not be identified: never read or write the cache.
+    uncacheable: bool,
     outputs: BTreeMap<String, ArtifactId>,
     /// Fully-resolved params (defaults applied), known from dispatch /
     /// cache-hit on — also what gets persisted to the task_run row.
@@ -77,8 +82,23 @@ struct Job {
     workdir: PathBuf,
     store_root: PathBuf,
     expected_validators: Vec<String>,
-    cancel_flag: PathBuf,
+    cancel: CancelToken,
     types: m3flow_core::atypes::TypeSet,
+    /// Bare task name (protected-type creation rights).
+    task_name: String,
+    /// Evidence a certified-type creation must be bound to.
+    promotion: Option<PromotionEvidence>,
+}
+
+/// What a `promote_equilibrated_state` job was handed: the state it may
+/// certify and the report that must vouch for exactly that state.
+#[derive(Debug, Clone)]
+pub struct PromotionEvidence {
+    pub state_content_hash: String,
+    pub state_producer: Option<String>,
+    /// file key -> sha256 of the state's files
+    pub state_files: BTreeMap<String, String>,
+    pub report: serde_json::Value,
 }
 
 enum OutcomeKind {
@@ -118,6 +138,7 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
                     task_run: resumed.and_then(|r| r.task_run.clone()),
                     attempts: 0,
                     cache_key: None,
+                    uncacheable: false,
                     outputs: resumed.map(|r| r.outputs.clone()).unwrap_or_default(),
                     params: resumed.and_then(|r| r.params.clone()),
                 },
@@ -145,11 +166,7 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
 
     let (tx, rx): (Sender<Outcome>, Receiver<Outcome>) = channel();
     let mut running = 0usize;
-    let cancel_flag = ctx
-        .project
-        .runs_dir()
-        .join(ctx.run.id.as_str())
-        .join("CANCEL");
+    let cancel = run_cancel_token(&ctx);
     let mut providers: BTreeMap<String, ProviderHandle> = BTreeMap::new();
     let mut cancelled = false;
 
@@ -161,7 +178,7 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
         }
 
         // ---- cancellation
-        if cancel_flag.exists() && !cancelled {
+        if !cancelled && cancel.is_requested() {
             cancelled = true;
             ctx.progress("run cancellation requested");
         }
@@ -271,9 +288,8 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
                     }
                 }
             };
-            let engine_version = handle
-                .engine_version()
-                .unwrap_or_else(|_| "unknown".to_string());
+            let engine_fp = handle.engine_fingerprint();
+            let config_fp = handle.config_fingerprint();
             let provider_version = handle
                 .describe()
                 .ok()
@@ -311,18 +327,32 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
                     continue;
                 }
             }
-            let key = cache_key(
-                &node.task,
-                &format!("{provider_name}@{provider_version}"),
-                &engine_version,
-                &resolved.input_hashes,
-                &resolved.params,
-            );
-            states.get_mut(&node.id).unwrap().cache_key = Some(key.clone());
+            let key = engine_fp.as_ref().map(|engine| {
+                cache_key(&CacheKeyParts {
+                    task_ref: &node.task,
+                    task_fingerprint: &task_spec.execution_fingerprint(),
+                    provider: &format!("{provider_name}@{provider_version}"),
+                    engine,
+                    config: &config_fp,
+                    inputs: &resolved.input_fingerprints,
+                    params: &resolved.params,
+                })
+            });
+            {
+                let st = states.get_mut(&node.id).unwrap();
+                st.cache_key = key.clone();
+                st.uncacheable = key.is_none();
+            }
+            if key.is_none() && !ctx.no_cache {
+                ctx.progress(&format!(
+                    "{}: cache bypassed (provider '{}' could not identify its engine)",
+                    node.id, provider_name
+                ));
+            }
 
             // cache lookup → CACHED short-circuit
-            if !ctx.no_cache {
-                if let Some(hit) = ctx.db.cache_lookup(&key)? {
+            if let (false, Some(key)) = (ctx.no_cache, &key) {
+                if let Some(hit) = ctx.db.cache_lookup(key)? {
                     apply_cache_hit(&mut ctx, &mut states, &node, &hit, &resolved)?;
                     dispatched_this_round = true;
                     ctx.progress(&format!("{}: CACHED", node.id));
@@ -332,7 +362,15 @@ pub fn execute(mut ctx: RunContext) -> Result<WorkflowRunRecord> {
 
             // dispatch real execution
             let attempt = states[&node.id].attempts + 1;
-            let job = build_job(&ctx, &node, &task_spec, &resolved, handle.clone(), attempt)?;
+            let job = build_job(
+                &ctx,
+                &node,
+                &task_spec,
+                &resolved,
+                handle.clone(),
+                attempt,
+                cancel.clone(),
+            )?;
             {
                 let st = states.get_mut(&node.id).unwrap();
                 st.status = TaskStatus::Running;
@@ -411,8 +449,9 @@ struct ResolvedNode {
     inputs: BTreeMap<String, Vec<ArtifactId>>,
     /// canonicalized task parameters
     params: serde_json::Map<String, serde_json::Value>,
-    /// input name -> content hashes (cache key material)
-    input_hashes: BTreeMap<String, Vec<String>>,
+    /// input name -> execution fingerprints (cache key material): file
+    /// identity + data payload + semantic metadata of each input
+    input_fingerprints: BTreeMap<String, Vec<String>>,
 }
 
 fn resolve_node(
@@ -421,7 +460,7 @@ fn resolve_node(
     node: &IrNode,
 ) -> Result<ResolvedNode> {
     let mut inputs = BTreeMap::new();
-    let mut input_hashes = BTreeMap::new();
+    let mut input_fingerprints = BTreeMap::new();
     for (name, binding) in &node.inputs {
         let ids: Vec<ArtifactId> = match binding {
             InputBinding::WorkflowInput { name: wname } => {
@@ -466,12 +505,12 @@ fn resolve_node(
                 collected
             }
         };
-        let mut hashes = Vec::new();
+        let mut fps = Vec::new();
         for id in &ids {
             let a = ctx.db.get_artifact(id.as_str())?;
-            hashes.push(a.content_hash.clone());
+            fps.push(execution_fingerprint(&a));
         }
-        input_hashes.insert(name.clone(), hashes);
+        input_fingerprints.insert(name.clone(), fps);
         inputs.insert(name.clone(), ids);
     }
 
@@ -505,7 +544,7 @@ fn resolve_node(
     Ok(ResolvedNode {
         inputs,
         params,
-        input_hashes,
+        input_fingerprints,
     })
 }
 
@@ -657,21 +696,157 @@ fn select_provider(
         })
 }
 
-fn cache_key(
-    task_ref: &str,
-    provider: &str,
-    engine_version: &str,
-    input_hashes: &BTreeMap<String, Vec<String>>,
-    params: &serde_json::Map<String, serde_json::Value>,
-) -> String {
+struct CacheKeyParts<'a> {
+    task_ref: &'a str,
+    task_fingerprint: &'a str,
+    provider: &'a str,
+    engine: &'a str,
+    config: &'a str,
+    inputs: &'a BTreeMap<String, Vec<String>>,
+    params: &'a serde_json::Map<String, serde_json::Value>,
+}
+
+/// Cache key v2: everything that can change a task's result. v1 keys
+/// (task + provider + engine name/version + input file hashes + params)
+/// missed the engine config, the full engine descriptor, the task
+/// definition and the inputs' data/semantic metadata; they never match v2.
+fn cache_key(p: &CacheKeyParts) -> String {
     canon::hash_json(&serde_json::json!({
-        "protocol": "m3flow-cache/1",
-        "task": task_ref,
-        "provider": provider,
-        "engine": engine_version,
-        "inputs": input_hashes,
-        "parameters": params,
+        "protocol": "m3flow-cache/2",
+        "task": p.task_ref,
+        "task_spec": p.task_fingerprint,
+        "provider": p.provider,
+        "engine": p.engine,
+        "engine_config": p.config,
+        "inputs": p.inputs,
+        "parameters": p.params,
     }))
+}
+
+/// Cancellation token of the current execution generation.
+fn run_cancel_token(ctx: &RunContext) -> CancelToken {
+    CancelToken::new(
+        ctx.project
+            .runs_dir()
+            .join(ctx.run.id.as_str())
+            .join("CANCEL"),
+        ctx.generation,
+    )
+}
+
+/// Every dispatch gets a fresh `attempt-NNN` directory under the step
+/// directory: no attempt can read another attempt's markers, responses or
+/// outputs, and failed attempts stay on disk for diagnosis.
+fn next_attempt_dir(step_dir: &std::path::Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(step_dir).map_err(|e| M3FlowError::io(e, "creating step dir"))?;
+    for i in 1..100_000u32 {
+        let dir = step_dir.join(format!("attempt-{i:03}"));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(M3FlowError::io(e, "creating attempt dir")),
+        }
+    }
+    Err(M3FlowError::internal("too many attempt directories"))
+}
+
+/// Attempt directories of a step, oldest first (empty for steps run by
+/// older binaries, whose files live directly in the step directory).
+pub fn attempt_dirs(step_dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(step_dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.is_dir()
+                        && p.file_name()
+                            .is_some_and(|n| n.to_string_lossy().starts_with("attempt-"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    dirs.sort();
+    dirs
+}
+
+/// Directory holding the latest attempt's files (the step directory
+/// itself for legacy runs).
+pub fn latest_attempt_dir(step_dir: &std::path::Path) -> PathBuf {
+    attempt_dirs(step_dir)
+        .pop()
+        .unwrap_or_else(|| step_dir.to_path_buf())
+}
+
+fn sha_of_relpath(rel: &str) -> String {
+    rel.rsplit('/').next().unwrap_or(rel).to_string()
+}
+
+fn promotion_evidence(
+    ctx: &RunContext,
+    resolved: &ResolvedNode,
+) -> Result<Option<PromotionEvidence>> {
+    let (Some(state), Some(report)) = (
+        resolved.inputs.get("state").and_then(|v| v.first()),
+        resolved.inputs.get("report").and_then(|v| v.first()),
+    ) else {
+        return Ok(None);
+    };
+    let state = ctx.db.get_artifact(state.as_str())?;
+    let report = ctx.db.get_artifact(report.as_str())?;
+    Ok(Some(PromotionEvidence {
+        state_content_hash: state.content_hash.clone(),
+        state_producer: state.producer.as_ref().map(|p| p.to_string()),
+        state_files: state
+            .files
+            .iter()
+            .map(|(k, rel)| (k.clone(), sha_of_relpath(rel)))
+            .collect(),
+        report: report.data.unwrap_or(serde_json::Value::Null),
+    }))
+}
+
+/// Runtime-side check of a certified-state creation, independent of the
+/// provider: the report must pass every check, must be bound to the very
+/// state being promoted (subject fingerprint, or thermo evidence from the
+/// task run that produced the state), and the output must carry the state's
+/// files unchanged.
+pub fn verify_promotion(
+    ev: &PromotionEvidence,
+    output: &Artifact,
+) -> std::result::Result<(), String> {
+    let r = &ev.report;
+    if r.get("equilibrated").and_then(|v| v.as_bool()) != Some(true) {
+        return Err("report is not passing (equilibrated != true)".into());
+    }
+    let checks = r.get("checks").and_then(|c| c.as_object());
+    match checks {
+        Some(c) if !c.is_empty() && c.values().all(|v| v.as_str() == Some("passed")) => {}
+        _ => return Err("report checks are missing or not all 'passed'".into()),
+    }
+    let subject_hash = r
+        .pointer("/subject/state_content_hash")
+        .and_then(|v| v.as_str());
+    let bound = match subject_hash {
+        Some(h) => h == ev.state_content_hash,
+        None => {
+            let producer = r
+                .pointer("/evidence/thermo/producer")
+                .and_then(|v| v.as_str());
+            matches!((producer, ev.state_producer.as_deref()), (Some(a), Some(b)) if a == b)
+        }
+    };
+    if !bound {
+        return Err("report is not bound to the promoted state".into());
+    }
+    let out_files: BTreeMap<String, String> = output
+        .files
+        .iter()
+        .map(|(k, rel)| (k.clone(), sha_of_relpath(rel)))
+        .collect();
+    if out_files != ev.state_files {
+        return Err("promoted artifact does not carry the state's files unchanged".into());
+    }
+    Ok(())
 }
 
 fn build_job(
@@ -681,6 +856,7 @@ fn build_job(
     resolved: &ResolvedNode,
     provider: ProviderHandle,
     attempt: u32,
+    cancel: CancelToken,
 ) -> Result<Job> {
     // Reuse the task_run row when re-dispatching after a retry/resume:
     // artifact links already reference it (PK changes would violate FK).
@@ -689,12 +865,12 @@ fn build_job(
         .get_task_run(ctx.run.id.as_str(), &node.id)
         .map(|r| r.id)
         .unwrap_or_else(|_| TaskRunId::new());
-    let workdir = ctx
-        .project
-        .runs_dir()
-        .join(ctx.run.id.as_str())
-        .join(&node.id);
-    std::fs::create_dir_all(&workdir).map_err(|e| M3FlowError::io(e, "creating task workdir"))?;
+    let workdir = next_attempt_dir(
+        &ctx.project
+            .runs_dir()
+            .join(ctx.run.id.as_str())
+            .join(&node.id),
+    )?;
 
     // request inputs with absolute store paths
     let mut inputs = serde_json::Map::new();
@@ -722,8 +898,14 @@ fn build_job(
         "inputs": inputs,
         "parameters": resolved.params,
         "resources": node.resources,
+        "attempt": attempt,
         "config": provider.config.engine.clone().unwrap_or(serde_json::json!({})),
     });
+    let (task_name, _) = split_task_ref(&node.task);
+    let promotion = match ctx.registry.types().protected("EquilibratedState") {
+        Some((_, creator)) if creator == task_name => promotion_evidence(ctx, resolved)?,
+        _ => None,
+    };
     Ok(Job {
         node: node.clone(),
         task_run_id,
@@ -731,15 +913,13 @@ fn build_job(
         executor: Executor::resolve(&ctx.project, &provider.name, ctx.executor_override),
         provider,
         request,
-        cancel_flag: ctx
-            .project
-            .runs_dir()
-            .join(ctx.run.id.as_str())
-            .join("CANCEL"),
+        cancel,
         workdir,
         store_root: ctx.project.artifacts_dir(),
         expected_validators: task.validation.clone(),
         types: ctx.registry.types().clone(),
+        task_name,
+        promotion,
     })
 }
 
@@ -756,6 +936,8 @@ fn artifact_request_json(ctx: &RunContext, id: &ArtifactId) -> Result<serde_json
         "id": a.id.as_str(),
         "type": a.artifact_type,
         "schema_version": a.schema_version,
+        "content_hash": a.content_hash,
+        "producer": a.producer.as_ref().map(|p| p.to_string()),
         "files": serde_json::Value::Object(files),
         "metadata": a.metadata,
         "data": a.data,
@@ -798,7 +980,7 @@ fn run_job(job: &Job) -> OutcomeKind {
         &job.workdir,
         &job.node.id,
         job.node.resources.as_ref(),
-        &job.cancel_flag,
+        &job.cancel,
     ) {
         Ok(r) => r,
         Err(e) => {
@@ -894,6 +1076,23 @@ fn run_job(job: &Job) -> OutcomeKind {
             category: "scientific_validation".into(),
         };
     }
+    // certified types: only their creator task may emit them
+    for (oname, staged) in &resp.outputs {
+        if let Some((ptype, creator)) = job.types.protected(&staged.artifact_type) {
+            if job.task_name != creator || job.promotion.is_none() {
+                return failure(
+                    "protected_type",
+                    "protocol_error",
+                    &format!(
+                        "output '{oname}' is a {} ({ptype} is certified: only '{creator}' \
+                         with state + report inputs may create it)",
+                        staged.artifact_type
+                    ),
+                    false,
+                );
+            }
+        }
+    }
     // ingest outputs into the CAS
     let store = match Store::new(job.store_root.clone()) {
         Ok(s) => s,
@@ -902,7 +1101,28 @@ fn run_job(job: &Job) -> OutcomeKind {
     let mut outputs = Vec::new();
     for (oname, staged) in &resp.outputs {
         match store.ingest_staged(staged, &job.workdir, Some(&job.task_run_id)) {
-            Ok((artifact, rows)) => outputs.push((oname.clone(), artifact, rows)),
+            Ok((artifact, rows)) => {
+                if job.types.protected(&artifact.artifact_type).is_some() {
+                    let verdict = job
+                        .promotion
+                        .as_ref()
+                        .ok_or_else(|| "no promotion evidence".to_string())
+                        .and_then(|ev| verify_promotion(ev, &artifact));
+                    if let Err(why) = verdict {
+                        return OutcomeKind::Failed {
+                            error: serde_json::json!({
+                                "error_type": "certification_rejected",
+                                "category": "scientific_validation",
+                                "recoverable": false,
+                                "message": format!("refusing to create {}: {why}", artifact.artifact_type),
+                            }),
+                            recoverable: false,
+                            category: "scientific_validation".into(),
+                        };
+                    }
+                }
+                outputs.push((oname.clone(), artifact, rows))
+            }
             Err(e) => return failure("io_error", "environment_error", &e.to_string(), false),
         }
     }
@@ -1095,6 +1315,13 @@ fn handle_outcome(
             for w in &warnings {
                 ctx.progress(&format!("{}: warning: {w}", node.id));
             }
+            // outputs, lineage edges, COMPLETED status and the cache entry
+            // commit together: a crash leaves either all or none of them
+            let tx = ctx
+                .db
+                .conn()
+                .unchecked_transaction()
+                .map_err(|e| M3FlowError::internal(format!("begin: {e}")))?;
             let mut map = BTreeMap::new();
             let mut mat_artifacts: Vec<(String, Artifact)> = Vec::new();
             for (oname, artifact, rows) in outputs {
@@ -1134,12 +1361,12 @@ fn handle_outcome(
                     outcome.task_run_id.as_str(),
                 ],
             );
-            // record the cache entry under the key stored at dispatch time
-            if let Ok(rec) = ctx.db.get_task_run(ctx.run.id.as_str(), &node.id) {
-                if let Some(key) = &rec.cache_key {
-                    ctx.db.cache_insert(key, outcome.task_run_id.as_str())?;
-                }
+            // record the cache entry under the key computed at dispatch time
+            if let Some(key) = states[&node.id].cache_key.clone() {
+                ctx.db.cache_insert(&key, outcome.task_run_id.as_str())?;
             }
+            tx.commit()
+                .map_err(|e| M3FlowError::internal(format!("commit: {e}")))?;
             ctx.progress(&format!("{}: COMPLETED", node.id));
             if ctx.materialize {
                 materialize_step(ctx, states, &node, &mat_artifacts);
@@ -1256,10 +1483,15 @@ fn persist_task_run(
         .ok_or_else(|| M3FlowError::internal("missing node"))?;
     let existing = ctx.db.get_task_run(ctx.run.id.as_str(), node_id).ok();
     let (task_name, task_version) = split_task_ref(&node.task);
-    let cache_key = existing
-        .as_ref()
-        .and_then(|r| r.cache_key.clone())
-        .or_else(|| st.cache_key.clone());
+    // the key computed at this dispatch wins; nodes restored by resume keep
+    // the row's key; an unidentifiable engine records none
+    let cache_key = if st.uncacheable {
+        None
+    } else {
+        st.cache_key
+            .clone()
+            .or_else(|| existing.as_ref().and_then(|r| r.cache_key.clone()))
+    };
     let rec = TaskRunRecord {
         id: st.task_run.clone().unwrap_or_default(),
         workflow_run_id: ctx.run.id.clone(),

@@ -78,7 +78,7 @@ fn fixture(tag: &str, provider: &str, setup_lines: &[&str]) -> Fixture {
             r#"#!/bin/bash
 # fake sbatch --parsable <script>
 for script; do :; done
-mode=$(grep -oP 'FAKE_MODE=\K\w+' "$script" | head -1)
+mode=$(sed -n 's/.*FAKE_MODE=\([A-Za-z0-9_]*\).*/\1/p' "$script" | head -1)
 mode=${{mode:-success}}
 if [ "$mode" = "timeout" ]; then
   jobid=$((RANDOM + 20000))
@@ -86,7 +86,8 @@ if [ "$mode" = "timeout" ]; then
   printf '%s\n' "$jobid"
   exit 0
 fi
-bash "$script" &
+# the batch script sees its own job id, like under real Slurm
+sh -c 'SLURM_JOB_ID=$$; export SLURM_JOB_ID; exec bash "$0"' "$script" &
 jobid=$!
 echo "$jobid RUNNING" >> "{st}/jobs"
 printf '%s\n' "$jobid"
@@ -148,14 +149,14 @@ exit 0
         "slow" => {
             r#"
     sleep 30
-    wd=$(grep -oP '"workdir":\s*"\K[^"]+' "$2")
+    wd=$(sed -n 's/.*"workdir": *"\([^"]*\)".*/\1/p' "$2" | head -1)
     echo "fake result" > "$wd/result.txt"
     echo '{"status":"success","outputs":{"result":{"type":"Result","files":{"summary":"result.txt"},"metadata":{},"data":{"value":42}}},"validation":[],"engine":{"name":"fake","version":"0.1"},"warnings":[]}'
 "#
         }
         _ => {
             r#"
-    wd=$(grep -oP '"workdir":\s*"\K[^"]+' "$2")
+    wd=$(sed -n 's/.*"workdir": *"\([^"]*\)".*/\1/p' "$2" | head -1)
     echo "fake result" > "$wd/result.txt"
     echo '{"status":"success","outputs":{"result":{"type":"Result","files":{"summary":"result.txt"},"metadata":{},"data":{"value":42}}},"validation":[],"engine":{"name":"fake","version":"0.1"},"warnings":[]}'
 "#
@@ -259,8 +260,19 @@ fn run_opts() -> RunOptions {
     }
 }
 
+/// Provider workdir of the latest attempt of step `make`.
 fn node_workdir(project: &Project, run_id: &str) -> PathBuf {
-    project.runs_dir().join(run_id).join("make")
+    m3flow_runtime::scheduler::latest_attempt_dir(&project.runs_dir().join(run_id).join("make"))
+}
+
+/// Exit code recorded in the marker ("<rc> <job id>").
+fn marker_rc(wd: &Path) -> String {
+    let text = std::fs::read_to_string(wd.join(".m3flow_exit")).unwrap();
+    let job = std::fs::read_to_string(wd.join("slurm_job_id")).unwrap();
+    let mut parts = text.split_whitespace();
+    let rc = parts.next().unwrap().to_string();
+    assert_eq!(parts.next(), Some(job.trim()), "marker names its job");
+    rc
 }
 
 #[test]
@@ -291,12 +303,7 @@ fn slurm_success_path_matches_local_contract() {
     ] {
         assert!(wd.join(f).is_file(), "missing {}", wd.join(f).display());
     }
-    assert_eq!(
-        std::fs::read_to_string(wd.join(".m3flow_exit"))
-            .unwrap()
-            .trim(),
-        "0"
-    );
+    assert_eq!(marker_rc(&wd), "0");
     let script = std::fs::read_to_string(wd.join("submit.sh")).unwrap();
     assert!(script.contains("#SBATCH --partition=fakepart"));
     assert!(script.contains("#SBATCH --qos=fakeqos"));
@@ -321,12 +328,7 @@ fn slurm_provider_failure_flows_through_marker() {
     assert_eq!(rec.status, RunStatus::Failed);
 
     let wd = node_workdir(&fx.project, rec.id.as_str());
-    assert_eq!(
-        std::fs::read_to_string(wd.join(".m3flow_exit"))
-            .unwrap()
-            .trim(),
-        "1"
-    );
+    assert_eq!(marker_rc(&wd), "1");
     let db = run_api::open_db(&fx.project).unwrap();
     let runs = db.task_runs_of(rec.id.as_str()).unwrap();
     assert_eq!(runs[0].status, TaskStatus::Failed);

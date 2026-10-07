@@ -23,10 +23,10 @@ from pathlib import Path
 
 import yaml
 
-from m3flow_provider import (Provider, ProviderFailure, artifact, read_request,
+from m3flow_provider import (quantity_value, Provider, ProviderFailure, artifact, read_request,
                              verdict)
 
-PROVIDER_VERSION = "0.4.0"
+PROVIDER_VERSION = "0.4.1"
 
 
 def _engine():
@@ -325,15 +325,7 @@ def prepare_simulation_system(req):
             shutil.copy(path, build_dir / Path(name).name)
 
     env = meta.get("environment") or {}
-    density_q = params.get("target_density") or env.get("target_density")
-    target_density = density_q["value"] if isinstance(density_q, dict) else None
-    box_size, box_dims = None, None
-    if env.get("box"):
-        dims = env["box"]
-        if isinstance(dims, dict) and dims.get("value") is not None:
-            box_size = dims["value"]
-        elif isinstance(dims, list):
-            box_dims = tuple(d["value"] if isinstance(d, dict) else d for d in dims)
+    target_density, box_size, box_dims = _env_geometry(env, params)
 
     substrate = None
     strategy = params.get("strategy") or "mc_random"
@@ -503,11 +495,43 @@ def prepare_simulation_system(req):
     }
 
 
+def _env_geometry(env, params):
+    """(target density g/cm3, cubic box edge A, (x, y, z) box A) from the
+    SystemSpec environment, unit-aware. The task parameter target_density
+    (already canonical) wins over the spec. Box forms: {x, y, z} (schema),
+    a single quantity (cubic), or a list of three quantities."""
+    density = params.get("target_density")
+    if density is None:
+        density = env.get("target_density")
+    target_density = quantity_value(density, "density", "target_density")
+    box_size, box_dims = None, None
+    box = env.get("box")
+    if isinstance(box, dict) and any(k in box for k in ("x", "y", "z")):
+        dims = tuple(quantity_value(box.get(k), "length", f"environment.box.{k}")
+                     for k in ("x", "y", "z"))
+        if any(d is None for d in dims):
+            raise ProviderFailure("input_invalid", "input_error",
+                                  "environment.box needs all of x, y and z")
+        box_dims = dims
+    elif isinstance(box, list):
+        if len(box) != 3:
+            raise ProviderFailure("input_invalid", "input_error",
+                                  "environment.box list needs three lengths")
+        box_dims = tuple(quantity_value(d, "length", "environment.box") for d in box)
+    elif box is not None:
+        box_size = quantity_value(box, "length", "environment.box")
+    for v in (box_size, *(box_dims or ())):
+        if v is not None and v <= 0:
+            raise ProviderFailure("input_invalid", "input_error",
+                                  "environment.box lengths must be positive")
+    return target_density, box_size, box_dims
+
+
 def _substrate_spec(meta, env):
     """Build an AutoPoly SubstrateSpec from interface environment + components."""
     import AutoPoly
-    gap = env.get("gap")
-    gap_v = gap["value"] if isinstance(gap, dict) else (gap or 3.0)
+    gap_v = quantity_value(env.get("gap"), "length", "environment.gap")
+    gap_v = 3.0 if gap_v is None else gap_v
     for comp in meta.get("components") or []:
         if comp["type"] == "substrate" and comp["representation"]["type"] == "name":
             opts = dict(comp.get("options") or {})

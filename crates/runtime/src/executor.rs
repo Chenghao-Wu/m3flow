@@ -1,12 +1,16 @@
 //! Execution backends for provider jobs (docs/slurm.md).
 //!
-//! The local backend runs the provider as a blocking subprocess (the
-//! historical behavior). The Slurm backend wraps the same provider call in a
+//! The local backend runs the provider as a child process in its own
+//! process group, polling it so cancellation and `resources.walltime` are
+//! enforced: the whole group (MPI launcher + ranks included) is terminated.
+//! The Slurm backend wraps the same provider call in a
 //! generated batch script, submits it with `sbatch`, and polls `squeue` until
 //! the job leaves the queue. Completion is signaled by an exit-code marker
-//! file the script writes (`.m3flow_exit`), so accounting (`sacct`) is only
-//! consulted when the job was killed before it could write the marker — the
-//! design therefore also works on clusters with accounting disabled.
+//! file the script writes (`.m3flow_exit`, "<rc> <job id>"), so accounting
+//! (`sacct`) is only consulted when the job was killed before it could write
+//! the marker — the design therefore also works on clusters with accounting
+//! disabled. A marker is only trusted when it names the job being waited on;
+//! every attempt also runs in a fresh directory (see the scheduler).
 //!
 //! Executors are a scheduling concern: nothing here joins cache keys,
 //! spec hashes, or artifact identity (same rule as `resources`).
@@ -14,8 +18,8 @@
 use m3flow_core::error::{M3FlowError, Result};
 use m3flow_core::specs::Resources;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::project::{ExecutorKind, Project, SlurmConfig};
 use crate::provider::{ExecuteResponse, ProviderError, ProviderHandle};
@@ -38,6 +42,64 @@ impl Executor {
     }
 }
 
+/// Cancellation request for one execution generation of a run.
+///
+/// `cancel_run` writes `runs/<id>/CANCEL` naming the generation it targets;
+/// a resumed run executes under a new generation, so a flag left behind by
+/// an earlier cancellation never cancels the resumed execution. A flag
+/// without a generation (older binaries) applies to any generation.
+#[derive(Debug, Clone)]
+pub struct CancelToken {
+    path: PathBuf,
+    generation: u64,
+}
+
+impl CancelToken {
+    pub fn new(path: PathBuf, generation: u64) -> Self {
+        Self { path, generation }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn is_requested(&self) -> bool {
+        match std::fs::read_to_string(&self.path) {
+            Ok(text) => match parse_cancel_generation(&text) {
+                Some(g) => g == self.generation,
+                None => true,
+            },
+            Err(_) => false,
+        }
+    }
+}
+
+/// Remove a CANCEL flag that targets an earlier execution (or carries no
+/// generation, i.e. predates generations). A flag naming `generation` — a
+/// cancel issued after this execution took ownership — is kept and honored.
+pub fn clear_stale_cancel(path: &Path, generation: u64) {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        if parse_cancel_generation(&text) != Some(generation) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Body of a CANCEL flag for `generation`.
+pub fn cancel_flag_body(generation: u64) -> String {
+    format!("cancel requested\ngeneration={generation}\n")
+}
+
+fn parse_cancel_generation(text: &str) -> Option<u64> {
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix("generation="))
+        .and_then(|g| g.trim().parse().ok())
+}
+
 /// Run `m3flow-<name> execute <request.json>` on the resolved backend.
 pub fn execute_provider(
     executor: &Executor,
@@ -46,10 +108,10 @@ pub fn execute_provider(
     workdir: &Path,
     node_id: &str,
     resources: Option<&Resources>,
-    cancel_flag: &Path,
+    cancel: &CancelToken,
 ) -> Result<ExecuteResponse> {
     match executor {
-        Executor::Local => handle.execute(request_path, workdir),
+        Executor::Local => execute_local(handle, request_path, workdir, resources, cancel),
         Executor::Slurm(cfg) => execute_slurm(
             cfg,
             handle,
@@ -57,9 +119,176 @@ pub fn execute_provider(
             workdir,
             node_id,
             resources,
-            cancel_flag,
+            cancel,
         ),
     }
+}
+
+// ------------------------------------------------------------------ local
+
+/// Grace period between SIGTERM and SIGKILL of a cancelled process group.
+const TERM_GRACE: Duration = Duration::from_secs(10);
+const LOCAL_POLL: Duration = Duration::from_millis(200);
+
+/// Walltime of a step as a duration (`None`: unlimited / not declared).
+pub fn walltime_limit(resources: Option<&Resources>) -> Result<Option<Duration>> {
+    let Some(raw) = resources.and_then(|r| r.walltime.as_deref()) else {
+        return Ok(None);
+    };
+    let norm = slurm_time(raw)?;
+    if norm == "INFINITE" {
+        return Ok(None);
+    }
+    // Slurm forms: M | M:S | H:M:S | D-H | D-H:M | D-H:M:S
+    let (days, rest) = match norm.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().unwrap_or(0), r.to_string()),
+        None => (0, norm.clone()),
+    };
+    let parts: Vec<u64> = rest.split(':').filter_map(|p| p.parse().ok()).collect();
+    let secs = match (norm.contains('-'), parts.as_slice()) {
+        (false, [m]) => m * 60,
+        (false, [m, s]) => m * 60 + s,
+        (false, [h, m, s]) => h * 3600 + m * 60 + s,
+        (true, [h]) => h * 3600,
+        (true, [h, m]) => h * 3600 + m * 60,
+        (true, [h, m, s]) => h * 3600 + m * 60 + s,
+        _ => return Err(M3FlowError::schema(format!("invalid walltime '{raw}'"))),
+    };
+    Ok(Some(Duration::from_secs(days * 86400 + secs)))
+}
+
+fn execute_local(
+    handle: &ProviderHandle,
+    request_path: &Path,
+    workdir: &Path,
+    resources: Option<&Resources>,
+    cancel: &CancelToken,
+) -> Result<ExecuteResponse> {
+    let limit = match walltime_limit(resources) {
+        Ok(l) => l,
+        Err(e) => {
+            return Ok(error_response(
+                handle,
+                workdir,
+                ProviderError {
+                    error_type: "invalid_resources".into(),
+                    category: "input_error".into(),
+                    recoverable: false,
+                    provider: None,
+                    task: None,
+                    message: Some(e.to_string()),
+                    details: None,
+                    raw_log: None,
+                },
+            ))
+        }
+    };
+    let stdout_path = workdir.join(PROVIDER_STDOUT);
+    let stderr_path = workdir.join(PROVIDER_STDERR);
+    let open = |p: &Path| {
+        std::fs::File::create(p)
+            .map_err(|e| M3FlowError::io(e, format!("creating {}", p.display())))
+    };
+    let mut cmd = Command::new(&handle.executable);
+    cmd.arg("execute")
+        .arg(request_path)
+        .stdin(Stdio::null())
+        .stdout(open(&stdout_path)?)
+        .stderr(open(&stderr_path)?);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0); // own group: cancellation reaches MPI children
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| M3FlowError::io(e, format!("spawning {}", handle.executable.display())))?;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| M3FlowError::io(e, "waiting for provider"))?
+        {
+            break status;
+        }
+        let (reason, error) = if cancel.is_requested() {
+            ("cancelled", None)
+        } else if limit.is_some_and(|l| started.elapsed() > l) {
+            ("walltime", limit)
+        } else {
+            std::thread::sleep(LOCAL_POLL);
+            continue;
+        };
+        terminate_group(&mut child);
+        let err = match (reason, error) {
+            ("cancelled", _) => ProviderError {
+                error_type: "cancelled".into(),
+                category: "environment_error".into(),
+                recoverable: false,
+                provider: None,
+                task: None,
+                message: Some("run cancelled; local provider process group terminated".into()),
+                details: None,
+                raw_log: Some(log_tails(workdir)),
+            },
+            (_, l) => ProviderError {
+                error_type: "walltime_exceeded".into(),
+                category: "resource_error".into(),
+                recoverable: true,
+                provider: None,
+                task: None,
+                message: Some(format!(
+                    "local job exceeded its walltime ({} s); raise resources.walltime \
+                     on the step to allow longer runs",
+                    l.map(|d| d.as_secs()).unwrap_or(0)
+                )),
+                details: None,
+                raw_log: Some(log_tails(workdir)),
+            },
+        };
+        return Ok(error_response(handle, workdir, err));
+    };
+    let text = std::fs::read_to_string(&stdout_path).unwrap_or_default();
+    let parsed: serde_json::Value =
+        serde_json::from_str(text.trim()).map_err(|e| M3FlowError::Provider {
+            provider: handle.name.clone(),
+            message: format!(
+                "invalid JSON from 'execute' (exit {status}): {e}\nstderr: {}",
+                std::fs::read_to_string(&stderr_path)
+                    .unwrap_or_default()
+                    .lines()
+                    .last()
+                    .unwrap_or("")
+            ),
+            details: None,
+            raw_log: None,
+        })?;
+    ExecuteResponse::persist_and_parse(parsed, workdir, &handle.name)
+}
+
+/// SIGTERM the child's process group, wait out the grace period, then
+/// SIGKILL whatever is left.
+fn terminate_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pgid = child.id() as i32;
+        // SAFETY: plain kill(2) on the process group we created.
+        unsafe {
+            libc::kill(-pgid, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + TERM_GRACE;
+        while Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                break;
+            }
+            std::thread::sleep(LOCAL_POLL);
+        }
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 // ------------------------------------------------------------------ slurm
@@ -85,10 +314,14 @@ fn execute_slurm(
     workdir: &Path,
     node_id: &str,
     resources: Option<&Resources>,
-    cancel_flag: &Path,
+    cancel: &CancelToken,
 ) -> Result<ExecuteResponse> {
     let default_res = Resources::default();
     let resources = resources.unwrap_or(&default_res);
+    // Never let a previous submission's outcome files answer for this one.
+    for stale in [EXIT_MARKER, PROVIDER_STDOUT, PROVIDER_STDERR, JOB_ID_FILE] {
+        let _ = std::fs::remove_file(workdir.join(stale));
+    }
     let job_id = match submit(cfg, handle, request_path, workdir, node_id, resources) {
         Ok(id) => id,
         Err(err) => return Ok(error_response(handle, workdir, err)),
@@ -99,7 +332,7 @@ fn execute_slurm(
     let mut poll_failures = 0u32;
     let mut tick = 0u64;
     loop {
-        if cancel_flag.exists() {
+        if cancel.is_requested() {
             let _ = run_slurm_cmd("scancel", &[job_id.as_str()]);
             return Ok(error_response(
                 handle,
@@ -159,7 +392,7 @@ fn finish_slurm_job(
     workdir: &Path,
     job_id: &str,
 ) -> Result<ExecuteResponse> {
-    if let Some(rc) = read_marker(workdir) {
+    if let Some(rc) = read_marker(workdir, job_id) {
         return resolve_marker(handle, workdir, rc);
     }
     // No marker: the job was killed before it could write. Accounting may
@@ -181,7 +414,7 @@ fn finish_slurm_job(
     // COMPLETED / lagging / accounting disabled: the marker decides.
     for _ in 0..MARKER_GRACE_TRIES {
         std::thread::sleep(Duration::from_secs(2));
-        if let Some(rc) = read_marker(workdir) {
+        if let Some(rc) = read_marker(workdir, job_id) {
             return resolve_marker(handle, workdir, rc);
         }
     }
@@ -192,12 +425,16 @@ fn finish_slurm_job(
     ))
 }
 
-fn read_marker(workdir: &Path) -> Option<i32> {
-    std::fs::read_to_string(workdir.join(EXIT_MARKER))
-        .ok()?
-        .trim()
-        .parse::<i32>()
-        .ok()
+/// Exit code from the marker, only if the marker was written by `job_id`
+/// ("<rc> <job id>"); anything else is not this job's outcome.
+fn read_marker(workdir: &Path, job_id: &str) -> Option<i32> {
+    let text = std::fs::read_to_string(workdir.join(EXIT_MARKER)).ok()?;
+    let mut parts = text.split_whitespace();
+    let rc = parts.next()?.parse::<i32>().ok()?;
+    match parts.next() {
+        Some(id) if id == job_id => Some(rc),
+        _ => None,
+    }
 }
 
 /// Marker present: trust the provider's own protocol output when it exists,
@@ -556,7 +793,7 @@ pub fn render_batch_script(
     ));
     s.push_str("rc=$?\n");
     s.push_str(&format!(
-        "echo \"$rc\" > {}\n",
+        "echo \"$rc ${{SLURM_JOB_ID:-unknown}}\" > {}\n",
         shell_quote(&workdir.join(EXIT_MARKER))
     ));
     s.push_str("exit \"$rc\"\n");
@@ -899,9 +1136,72 @@ mod tests {
         assert!(script.contains("module load anaconda3\nsource activate autopoly\n"));
         assert!(script.contains("'/opt/bin/m3flow-fake' execute '"));
         assert!(script.contains("rc=$?\n"));
+        assert!(script.contains("echo \"$rc ${SLURM_JOB_ID:-unknown}\" > "));
         assert!(script.contains(".m3flow_exit"));
         assert!(script.contains("provider_stdout.json"));
         assert!(script.contains("exit \"$rc\"\n"));
+    }
+
+    #[test]
+    fn marker_must_name_the_job() {
+        let wd = std::env::temp_dir().join(format!("m3marker-{}", std::process::id()));
+        std::fs::create_dir_all(&wd).unwrap();
+        std::fs::write(wd.join(EXIT_MARKER), "0\n").unwrap();
+        assert_eq!(read_marker(&wd, "42"), None, "legacy marker without job id");
+        std::fs::write(wd.join(EXIT_MARKER), "0 41\n").unwrap();
+        assert_eq!(read_marker(&wd, "42"), None, "marker of another job");
+        std::fs::write(wd.join(EXIT_MARKER), "3 42\n").unwrap();
+        assert_eq!(read_marker(&wd, "42"), Some(3));
+        let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    #[test]
+    fn cancel_flag_targets_one_generation() {
+        let p = std::env::temp_dir().join(format!("m3cancel-{}", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let gen1 = CancelToken::new(p.clone(), 1);
+        let gen2 = CancelToken::new(p.clone(), 2);
+        assert!(!gen1.is_requested());
+        std::fs::write(&p, cancel_flag_body(1)).unwrap();
+        assert!(gen1.is_requested());
+        assert!(
+            !gen2.is_requested(),
+            "stale flag must not cancel a resumed execution"
+        );
+        std::fs::write(&p, "cancel requested\n").unwrap();
+        assert!(gen2.is_requested(), "legacy flag applies to any generation");
+        // a new execution clears older flags but honors one aimed at itself
+        clear_stale_cancel(&p, 2);
+        assert!(!p.exists());
+        std::fs::write(&p, cancel_flag_body(1)).unwrap();
+        clear_stale_cancel(&p, 2);
+        assert!(!p.exists());
+        std::fs::write(&p, cancel_flag_body(2)).unwrap();
+        clear_stale_cancel(&p, 2);
+        assert!(gen2.is_requested());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn walltime_parsing() {
+        let r = |w: &str| Resources {
+            walltime: Some(w.into()),
+            ..Default::default()
+        };
+        assert_eq!(walltime_limit(None).unwrap(), None);
+        assert_eq!(
+            walltime_limit(Some(&r("2 h"))).unwrap(),
+            Some(Duration::from_secs(7200))
+        );
+        assert_eq!(
+            walltime_limit(Some(&r("1:30:00"))).unwrap(),
+            Some(Duration::from_secs(5400))
+        );
+        assert_eq!(
+            walltime_limit(Some(&r("1-02:00:00"))).unwrap(),
+            Some(Duration::from_secs(93600))
+        );
+        assert_eq!(walltime_limit(Some(&r("UNLIMITED"))).unwrap(), None);
     }
 
     #[test]

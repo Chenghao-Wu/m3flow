@@ -867,9 +867,16 @@ fn logs_cmd(p: &Project, run_id: &str, step: Option<&str>, json: bool) -> Result
         steps = matches;
     }
     let mut out = Vec::new();
-    for dir in &steps {
-        let name = dir.file_name().unwrap().to_string_lossy().to_string();
-        let mut files: Vec<String> = std::fs::read_dir(dir)?
+    for step_dir in &steps {
+        let name = step_dir.file_name().unwrap().to_string_lossy().to_string();
+        // each dispatch runs in its own attempt-NNN dir; show the latest and
+        // list all (earlier failures stay available for diagnosis)
+        let attempts: Vec<String> = m3flow_runtime::scheduler::attempt_dirs(step_dir)
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect();
+        let dir = m3flow_runtime::scheduler::latest_attempt_dir(step_dir);
+        let mut files: Vec<String> = std::fs::read_dir(&dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
@@ -880,6 +887,7 @@ fn logs_cmd(p: &Project, run_id: &str, step: Option<&str>, json: bool) -> Result
         out.push(serde_json::json!({
             "step": name,
             "workdir": dir.display().to_string(),
+            "attempts": attempts,
             "files": files,
             "response": response,
         }));

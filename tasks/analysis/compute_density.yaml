@@ -1,7 +1,7 @@
 schema: task/v1
 
 name: compute_density
-version: 1.0.0
+version: 1.1.0
 
 description: >
   Mean density and its standard error over the equilibrated tail of an NPT
@@ -23,7 +23,10 @@ parameters:
   equilibration_fraction:
     type: number
     default: 0.5
-    description: Fraction of the series discarded as equilibration before averaging.
+    description: >
+      Fraction of the series discarded from the start (equilibration)
+      before averaging; 0 <= f < 1. The standard error uses blocking
+      (time-correlated samples).
 
 outputs:
   result:

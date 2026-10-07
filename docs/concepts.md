@@ -30,8 +30,10 @@ content_hash, producer, created_at}`.
 
 - Files live in the CAS at `.m3flow/artifacts/sha256/<2>/<hash>`; identical
   bytes are stored once.
-- `content_hash` = hash(type + schema_version + per-file sha256). Metadata is
-  deliberately excluded from identity.
+- `content_hash` = hash(type + schema_version + per-file sha256): file
+  identity. As a task *input*, an artifact is identified by its execution
+  fingerprint (content hash + data + semantic metadata), which is what
+  cache keys use.
 - `data` is a small JSON payload (e.g. a DensityResult's value/unit) that
   conditions and `${step.out.data.field}` references read.
 - The type hierarchy is nominal subtyping: `EquilibratedState <:
@@ -77,7 +79,8 @@ content_hash, producer, created_at}`.
   provider_error, execution_error, scientific_validation, environment_error)
   everywhere — agents branch on them programmatically (all CLI has `--json`).
 - **resume/retry**: `m3flow run resume <wr>` keeps completed steps;
-  `run retry <wr> <step>` re-executes one step and its downstream.
+  `run retry <wr> <step>` re-executes one step and its downstream. Both
+  refuse a run whose execution closure changed since it started.
 
 ## Provenance
 

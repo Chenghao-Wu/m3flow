@@ -86,9 +86,14 @@ Artifacts are immutable, typed, content-addressed records:
 
 - Files live in the content-addressed store (CAS) at
   `.m3flow/artifacts/sha256/<2>/<hash>`; identical bytes are stored once.
-- `content_hash` = hash(type + schema_version + per-file sha256). Metadata
-  is deliberately excluded from identity — it describes, it never
-  identifies.
+- `content_hash` = hash(type + schema_version + per-file sha256): the
+  *file identity* (deduplication, lineage). Metadata and data are excluded.
+- The *execution fingerprint* of an artifact — what cache keys use for
+  inputs — adds the `data` payload and the semantic metadata (time axes,
+  unit systems, strides, …); only presentation keys (`description`,
+  `display_name`, `label`, `labels`, `notes`, `tags`) are excluded. Two
+  trajectories with identical bytes but different `frame_interval_fs` are
+  different task inputs.
 - `data` is a small inline JSON payload (e.g. a DensityResult's
   `value/unit`) that workflow conditions and `${step.out.data.field}`
   references read.
@@ -131,7 +136,25 @@ An **EquilibratedState** can only come into existence through a passing
 **EquilibrationReport** — via the `promote_equilibrated_state` task.
 Finishing a protocol (the last MD stage completing) is never treated as
 proof of equilibration. This is enforced by the type system plus the
-runtime, not by convention.
+runtime, not by convention:
+
+- every check of the report is `passed` / `failed` / `insufficient_data` /
+  `error`, and only an all-`passed` report certifies — missing evidence
+  (e.g. an unreadable trajectory) never counts as a pass;
+- the report records the evidence it examined (artifact ids, content
+  hashes, producing task run), its criteria version and sampling window,
+  and — when the check receives `state` — the state it certifies;
+- promotion requires the report to be bound to the promoted state (its
+  subject fingerprint, or thermo evidence from the task run that produced
+  the state), and the runtime re-verifies that binding and that the
+  state's files are carried unchanged;
+- certified types cannot be registered by hand or emitted by any other
+  task; forced promotion (`require_pass: false`) was removed — to continue
+  without certification, use the `SimulationState` directly.
+
+A pass certifies stationarity of the checked observables over one sampling
+window, for the stated scope. It is not evidence of conformational,
+entanglement or long-time dynamical equilibration.
 
 ---
 
@@ -417,18 +440,31 @@ This is a guardrail against accidental drift, not a security boundary —
 Before executing, a node looks up:
 
 ```
-hash(task@version, provider@version, engine version,
-     input content hashes, canonical params)
+hash("m3flow-cache/2", task@version, TaskSpec execution fingerprint,
+     provider@version, engine descriptor fingerprint,
+     effective engine config, input execution fingerprints, canonical params)
 ```
+
+- The engine descriptor is the provider's whole `describe.engine` object
+  (version, resolved executable, compiled packages, library versions), and
+  `describe` is called with the configured engine config so it probes the
+  engine `execute` would actually launch.
+- The engine config forwarded to the provider joins the key, minus keys the
+  provider declares `scheduling_config_keys` (e.g. MPI rank count).
+- A provider that cannot identify its engine (`unknown` / `unavailable`)
+  bypasses the cache entirely — such results are never shared.
+- Keys of the older `m3flow-cache/1` scheme never match; old entries are
+  simply unused (`m3flow cache clear` removes them).
 
 A hit marks the node **CACHED** and links the original artifacts —
 provenance stays complete, and a repeated workflow is nearly instant (the
 reference `polymer_multi` run is 35/35 CACHED in ~4 s). `--no-cache`
 bypasses; `m3flow cache clear` drops entries (artifacts are kept).
 
-Correctness depends on versioning discipline: if a task's logic changes
-meaningfully, bump its `version`; the provider version and engine version
-join the key automatically via `describe`.
+Versioning discipline still matters: if a task's logic changes
+meaningfully, bump its `version` (and the provider's version when provider
+code changes); the engine descriptor and config join the key
+automatically.
 
 ### 6.2 Failure taxonomy, retry, resume
 
@@ -438,11 +474,26 @@ Every failure carries a structured `error_type` + `category`
 programmatically. Per-step `retry: {max_attempts, on: [categories]}`
 retries recoverable categories automatically.
 
-- `m3flow run resume <wr>` — keep completed steps, re-run the rest.
+- `m3flow run resume <wr>` — keep completed steps, re-run the rest. Resume
+  reuses the run's original execution options (executor override,
+  concurrency, cache policy) and refuses to continue if the run's
+  execution closure (expanded graph, parameters, referenced task
+  definitions) changed since submission — same-`name@version` edits are
+  allowed in development projects (with a warning), but not mid-run.
 - `m3flow run retry <wr> <step>` — re-execute one step and everything
   downstream of it.
-- `m3flow run cancel <wr>` — request cancellation; with the Slurm executor
-  in-flight jobs are additionally `scancel`ed.
+- `m3flow run cancel <wr>` — request cancellation of the run's current
+  execution: local provider process groups (including MPI children) are
+  terminated, Slurm jobs are `scancel`ed. A later resume runs as a new
+  execution generation and is not affected by the old request.
+- One process executes a run at a time: it holds an exclusive OS lock on
+  `runs/<wr>/OWNER` (released automatically when the process exits), so a
+  second resume/retry fails while the owner is alive and a crashed owner
+  never blocks recovery. A scheduler error only finalizes its own run.
+- Every dispatch runs in a fresh `runs/<wr>/<step>/attempt-NNN/`
+  directory; earlier attempts stay on disk for diagnosis.
+- `resources.walltime` is enforced for local jobs too
+  (`walltime_exceeded`, `resource_error`, recoverable).
 
 Provider task failures include `raw_log` (the engine log tail) and
 `m3flow run logs <wr> [--step …]` surfaces the full request/response and
@@ -622,16 +673,22 @@ Rules: exactly one JSON document on **stdout** (human chatter to stderr);
 exit `0` for any well-formed response *including scientific failures*;
 non-zero only for protocol violations.
 
-- **describe** → `{protocol, provider: {name, version}, engine: {name,
-  version, path}, tasks: [...], validators: [...]}`. The engine version
-  joins the cache key — report it accurately.
+- **describe** `[CONFIG.json]` → `{protocol, provider: {name, version},
+  engine: {name, version, ...}, scheduling_config_keys, tasks: [...]}`. The
+  optional argument is the engine config the runtime will forward to
+  `execute`; probe *that* engine. The whole `engine` object joins the cache
+  key — report it accurately, and report `unknown` when you cannot tell
+  (such results are never cached).
 - **validate** → `{valid, errors[]}` — check an execute request without
   running it.
 - **execute** — request carries `{task, workflow_run_id, task_run_id,
-  workdir, inputs, parameters, resources, config}`. Input files are
-  **absolute CAS paths, never written to**; outputs must be staged inside
-  `workdir` and returned as workdir-relative paths; quantities arrive
-  canonicalized (`{value, unit}`). Success response: `{status: "success",
+  attempt, workdir, inputs, parameters, resources, config}`; each input
+  artifact carries `{id, type, content_hash, producer, files, metadata,
+  data}`. Input files are **absolute CAS paths, never written to**;
+  outputs must be staged inside `workdir` and returned as workdir-relative
+  paths (no `..`, no symlinks out); quantities arrive canonicalized
+  (`{value, unit}`). Responses are strict JSON: NaN/Infinity are protocol
+  errors — report missing statistics as `null` with a status. Success response: `{status: "success",
   outputs, validation: [{name, passed, detail}], engine, warnings}`. Every
   validator named by the TaskSpec must appear with a verdict. Scientific
   failure: `{status: "error", error: {error_type, category, recoverable,
@@ -679,18 +736,18 @@ the runtime refuses providers whose major protocol differs.
 
 | task | summary |
 |---|---|
-| `compute_density` | mean density + standard error over the equilibrated NPT tail |
+| `compute_density` | mean density + blocked standard error after discarding `equilibration_fraction` of the series |
 | `compute_msd` | mean-squared displacement vs lag time (unwrapped coords) |
 | `compute_rdf` | g(r), optionally between atom-type selections |
 | `compute_rg` | radius of gyration of polymer chains (by molecule id) |
-| `compute_ree` | mean end-to-end distance of chains |
-| `compute_adhesion` | work of adhesion from interaction energy |
+| `compute_ree` | mean end-to-end distance of linear chains (ends from the bond graph or an explicit selection) |
+| `compute_adhesion` | interfacial interaction-energy density −⟨E_int⟩/(n·A) (pair + kspace terms; not the reversible work of adhesion) |
 | `collect_thermo_series` | fan-in a temperature sweep into one TemperatureSeries |
-| `fit_diffusion` | Einstein-relation linear fit of MSD → D |
+| `fit_diffusion` | Einstein-relation linear fit of MSD → D (cm²/s; reduced units for lj unless `sigma`/`tau` are given) |
 | `fit_cte` | volumetric thermal expansion coefficient α |
 | `fit_tg` | bilinear V(T) fit → glass transition temperature |
 | `fit_modulus` | Young's modulus from the linear stress-strain region |
-| `check_polymer_equilibration` | density drift, energy drift, … → EquilibrationReport |
+| `check_polymer_equilibration` | density drift/shift, energy + volume trend/shift, Rg stability → evidence-bound EquilibrationReport |
 | `promote_equilibrated_state` | SimulationState → EquilibratedState, gated on a passing report |
 
 ---
@@ -729,7 +786,7 @@ the runtime refuses providers whose major protocol differs.
 | `rdf` | radial distribution function |
 | `cte` | volumetric thermal expansion coefficient |
 | `tg` | glass transition temperature from bilinear V(T) |
-| `adhesion` | work of adhesion from an interface series |
+| `adhesion` | interaction-energy density from an interface series |
 | `mechanical_properties` | Young's modulus from a stress-strain series |
 | `polymer_basic_properties` | one-shot panel for an equilibrated polymer |
 
@@ -944,7 +1001,7 @@ reproducible via `./run_all.sh`:
 | `ethanol_diffusion` | SMILES → equilibrate → NVE → MSD → D | full pipeline |
 | `peo_density` | Larsen 21-step equilibration → density | 1.069 g/cm³ (lit. ~1.1) |
 | `polymer_multi` | property fan-out + cache | 3rd run 35/35 CACHED in ~4 s |
-| `peo_silica_adhesion` | quartz slab + film → work of adhesion | W = 101 mJ/m² |
+| `peo_silica_adhesion` | quartz slab + film → interaction-energy density | W = 101 mJ/m² (measured before the kspace fix: pair terms only) |
 | `cg_melt` | bead-spring CG construct → push-off → NVT | CG path |
 
 Reduced scale demonstrates the platform, not converged physics: ps-scale
@@ -961,12 +1018,15 @@ Do not break these; correctness and trust depend on them.
   parameters — `{value, unit}` or `"300 K"` strings, canonicalized
   (K, bar, fs, Å, g/cm³, kcal/mol, Å²).
 - **Artifact identity = type + schema version + per-file content hashes.**
-  Metadata is descriptive, never identity.
-- **Cache key = task@version + provider@version + engine version + input
-  content hashes + canonical params.** Anything that can change a result
+  Task inputs are identified by their execution fingerprint (identity +
+  data + semantic metadata).
+- **Cache key = task@version + TaskSpec fingerprint + provider@version +
+  engine descriptor + effective engine config + input execution
+  fingerprints + canonical params.** Anything that can change a result
   must join the key — including passthrough config dicts.
-- **EquilibratedState only via `promote_equilibrated_state`** gated on a
-  passing EquilibrationReport.
+- **EquilibratedState only via `promote_equilibrated_state`** from a
+  passing EquilibrationReport bound to that state (runtime-verified).
+- **A resume executes the definition the run started with.**
 - **Providers are separate processes** speaking `m3flow-provider/1` (one
   JSON document on stdout); the runtime owns ingestion into the CAS.
 - **Protocols are immutable once published** — fork versions, never edit

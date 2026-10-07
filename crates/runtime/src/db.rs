@@ -148,9 +148,23 @@ fn migrate(conn: &Connection) -> Result<()> {
         .map_err(|e| M3FlowError::internal(format!("sqlite migrate probe: {e}")))?
         .flatten()
         .collect();
-    if !columns.iter().any(|c| c == "label") {
-        conn.execute("ALTER TABLE workflow_run ADD COLUMN label TEXT", [])
-            .map_err(|e| M3FlowError::internal(format!("sqlite migrate (label): {e}")))?;
+    for (column, ddl) in [
+        ("label", "ALTER TABLE workflow_run ADD COLUMN label TEXT"),
+        // fingerprint of everything the run executes (see compile.rs)
+        (
+            "closure_hash",
+            "ALTER TABLE workflow_run ADD COLUMN closure_hash TEXT",
+        ),
+        // execution options a resume must reuse (executor, concurrency, ...)
+        (
+            "execution_json",
+            "ALTER TABLE workflow_run ADD COLUMN execution_json TEXT",
+        ),
+    ] {
+        if !columns.iter().any(|c| c == column) {
+            conn.execute(ddl, [])
+                .map_err(|e| M3FlowError::internal(format!("sqlite migrate ({column}): {e}")))?;
+        }
     }
     Ok(())
 }
@@ -219,6 +233,69 @@ impl Db {
             )
             .map_err(|e| M3FlowError::internal(format!("update workflow_run: {e}")))?;
         Ok(())
+    }
+
+    /// Record the execution-closure fingerprint and the execution options of
+    /// a run (written once at submission; read back by resume).
+    pub fn set_run_execution(
+        &self,
+        id: &str,
+        closure_hash: &str,
+        execution: &serde_json::Value,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE workflow_run SET closure_hash=?2, execution_json=?3 WHERE id=?1",
+                params![id, closure_hash, execution.to_string()],
+            )
+            .map_err(|e| M3FlowError::internal(format!("record run execution: {e}")))?;
+        Ok(())
+    }
+
+    /// (closure_hash, execution options) of a run; both None for runs
+    /// created before they were recorded.
+    pub fn run_execution(&self, id: &str) -> Result<(Option<String>, Option<serde_json::Value>)> {
+        self.conn
+            .query_row(
+                "SELECT closure_hash, execution_json FROM workflow_run WHERE id=?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?
+                            .and_then(|s| serde_json::from_str(&s).ok()),
+                    ))
+                },
+            )
+            .map_err(|_| M3FlowError::not_found(format!("workflow run '{id}'")))
+    }
+
+    /// Hard-error cleanup for ONE run: its non-terminal task rows become
+    /// CANCELLED and, if still RUNNING/PENDING, the run becomes FAILED.
+    /// Never touches other runs sharing the database.
+    pub fn fail_run(&self, id: &str, error: &str) -> Result<()> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| M3FlowError::internal(format!("begin: {e}")))?;
+        tx.execute(
+            "UPDATE task_run SET status='CANCELLED'
+             WHERE workflow_run_id=?1 AND status IN ('RUNNING','PENDING','READY')",
+            params![id],
+        )
+        .map_err(|e| M3FlowError::internal(format!("cancel task rows: {e}")))?;
+        tx.execute(
+            "UPDATE workflow_run SET status='FAILED', ended_at=?2, error_json=?3
+             WHERE id=?1 AND status IN ('RUNNING','PENDING')",
+            params![
+                id,
+                m3flow_core::artifact::now_rfc3339(),
+                serde_json::Value::String(error.to_string()).to_string()
+            ],
+        )
+        .map_err(|e| M3FlowError::internal(format!("fail run: {e}")))?;
+        tx.commit()
+            .map_err(|e| M3FlowError::internal(format!("commit: {e}")))
     }
 
     /// Set/clear a run's study label. Pure metadata UPDATE — must never

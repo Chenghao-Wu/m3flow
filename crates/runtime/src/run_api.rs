@@ -109,6 +109,7 @@ pub fn run_workflow(
     let store = open_store(project)?;
     let spec = registry.workflow(workflow_ref)?.clone();
     let compiled = Compiler::new(&registry).compile(&spec, &opts.params)?;
+    warn_overrides(&registry, &compiled);
 
     let workflow_inputs = bind_inputs(&compiled, &opts.inputs, &db, &store, registry.types())?;
     let label = opts.label.as_deref().map(validate_label).transpose()?;
@@ -136,10 +137,22 @@ pub fn run_workflow(
         error: None,
         label,
     };
-    std::fs::create_dir_all(project.runs_dir().join(run.id.as_str()))
-        .map_err(|e| M3FlowError::io(e, "creating run dir"))?;
+    let run_dir = project.runs_dir().join(run.id.as_str());
+    let lease = crate::lease::acquire(&run_dir)?;
     db.insert_workflow_run(&run)?;
+    let execution = ExecutionOptions {
+        executor_override: opts.executor_override,
+        max_concurrency: opts.max_concurrency,
+        no_cache: opts.no_cache,
+        no_materialize: opts.no_materialize,
+    };
+    db.set_run_execution(
+        run.id.as_str(),
+        &compiled.closure_hash,
+        &serde_json::to_value(&execution).unwrap_or_default(),
+    )?;
 
+    let run_id = run.id.to_string();
     let ctx = RunContext {
         max_concurrency: opts
             .max_concurrency
@@ -147,6 +160,7 @@ pub fn run_workflow(
         no_cache: opts.no_cache,
         materialize: project.materialize_enabled() && !opts.no_materialize,
         executor_override: opts.executor_override,
+        generation: lease.generation,
         progress: opts.progress,
         resume: BTreeMap::new(),
         project: project.clone(),
@@ -157,28 +171,57 @@ pub fn run_workflow(
         workflow_inputs,
         run,
     };
-    finalize_on_error(scheduler::execute(ctx), project)
+    let result = finalize_on_error(scheduler::execute(ctx), project, &run_id);
+    drop(lease);
+    result
+}
+
+/// Same name@version redefinitions used by this run: allowed in development
+/// projects, but never silent (versions are supposed to be immutable).
+fn warn_overrides(registry: &Registry, compiled: &CompiledWorkflow) {
+    let mut used: BTreeSet<String> = compiled
+        .nodes
+        .iter()
+        .map(|n| format!("task:{}", n.task))
+        .collect();
+    used.insert(format!("workflow:{}@{}", compiled.name, compiled.version));
+    for (key, old, new) in registry.overrides() {
+        if used.contains(key) {
+            eprintln!(
+                "warning: {key} from {new} overrides the definition from {old} \
+                 (same name@version); bump the version for a changed protocol"
+            );
+        }
+    }
+}
+
+/// Execution options of a run, persisted at submission so `resume` and
+/// `retry` continue under the same executor, concurrency and cache policy.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct ExecutionOptions {
+    #[serde(default)]
+    executor_override: Option<crate::project::ExecutorKind>,
+    #[serde(default)]
+    max_concurrency: Option<usize>,
+    #[serde(default)]
+    no_cache: bool,
+    #[serde(default)]
+    no_materialize: bool,
 }
 
 /// If the scheduler dies with a hard error, the run row must not stay
-/// RUNNING — mark it FAILED before propagating.
+/// RUNNING — mark *this* run FAILED (never any other run sharing the
+/// project database) before propagating.
 fn finalize_on_error(
     result: Result<WorkflowRunRecord>,
     project: &Project,
+    run_id: &str,
 ) -> Result<WorkflowRunRecord> {
     match result {
         Ok(rec) => Ok(rec),
         Err(e) => {
             if let Ok(db) = open_db(project) {
-                // best-effort: mark non-terminal task rows CANCELLED, run FAILED
-                let _ = db.conn().execute(
-                    "UPDATE task_run SET status='CANCELLED' WHERE workflow_run_id IN (SELECT id FROM workflow_run WHERE status='RUNNING') AND status IN ('RUNNING','PENDING','READY')",
-                    [],
-                );
-                let _ = db.conn().execute(
-                    "UPDATE workflow_run SET status='FAILED', ended_at=?1, error_json=?2 WHERE status='RUNNING'",
-                    rusqlite::params![now_rfc3339(), e.to_string()],
-                );
+                let _ = db.fail_run(run_id, &e.to_string());
             }
             Err(e)
         }
@@ -233,12 +276,22 @@ fn resume_impl(
     let db = open_db(project)?;
     let store = open_store(project)?;
     let rec = db.get_workflow_run(run_id)?;
-    // A RUNNING row with no live process means a crashed run (the CLI is
-    // single-writer per project); resume is the recovery path.
+    // Ownership first: refuses while another live process executes the run,
+    // takes over the lease of a crashed one.
+    let run_dir = project.runs_dir().join(run_id);
+    let lease = crate::lease::acquire(&run_dir)?;
+    // No earlier execution is alive now: a cancellation request aimed at
+    // one is spent. A request already naming this new generation stays.
+    crate::executor::clear_stale_cancel(&run_dir.join("CANCEL"), lease.generation);
     if rec.status == RunStatus::Running {
         eprintln!("warning: run '{run_id}' was marked RUNNING (crashed run); resuming");
     }
     let compiled = recompile(&registry, &rec)?;
+    let (closure, execution) = db.run_execution(run_id)?;
+    check_definition_unchanged(&rec, closure.as_deref(), &compiled)?;
+    let execution: ExecutionOptions = execution
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
 
     let mut workflow_inputs = BTreeMap::new();
     if let Some(obj) = rec.inputs.as_object() {
@@ -286,10 +339,13 @@ fn resume_impl(
     run.ended_at = None;
     run.error = None;
     let ctx = RunContext {
-        max_concurrency: project.max_concurrency(),
-        no_cache: false,
-        materialize: project.materialize_enabled(),
-        executor_override: None,
+        max_concurrency: execution
+            .max_concurrency
+            .unwrap_or_else(|| project.max_concurrency()),
+        no_cache: execution.no_cache,
+        materialize: project.materialize_enabled() && !execution.no_materialize,
+        executor_override: execution.executor_override,
+        generation: lease.generation,
         progress,
         resume,
         project: project.clone(),
@@ -300,17 +356,72 @@ fn resume_impl(
         workflow_inputs,
         run,
     };
-    finalize_on_error(scheduler::execute(ctx), project)
+    let result = finalize_on_error(scheduler::execute(ctx), project, run_id);
+    drop(lease);
+    result
 }
 
-/// Signal cancellation: the scheduler polls for this flag file.
+/// Resuming must execute the definition the run started with. Same-name,
+/// same-version definitions can be overwritten in development projects, so
+/// the recompiled execution closure is compared with the one recorded at
+/// submission (or, for runs recorded before closures existed, the
+/// top-level spec hash).
+fn check_definition_unchanged(
+    rec: &WorkflowRunRecord,
+    recorded_closure: Option<&str>,
+    compiled: &CompiledWorkflow,
+) -> Result<()> {
+    let (what, then, now) = match recorded_closure {
+        Some(c) => ("execution closure", c, compiled.closure_hash.as_str()),
+        None => (
+            "spec hash",
+            rec.spec_hash.as_str(),
+            compiled.spec_hash.as_str(),
+        ),
+    };
+    if then != now {
+        return Err(M3FlowError::workflow(
+            format!(
+                "cannot resume run '{}': the definition of {}@{} (or a task it uses) \
+                 changed since the run started ({what} {} -> {}). Restore the original \
+                 definition, or start a new run (bump the version for a changed protocol).",
+                rec.id,
+                rec.name,
+                rec.version,
+                m3flow_core::canon::short_hash(then, 12),
+                m3flow_core::canon::short_hash(now, 12),
+            ),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Signal cancellation of the run's current execution: the scheduler (and
+/// every local/Slurm job of that execution) polls for this flag. The flag
+/// names the execution generation, so it cannot cancel a later resume.
 pub fn cancel_run(project: &Project, run_id: &str) -> Result<()> {
     let dir = project.runs_dir().join(run_id);
     if !dir.is_dir() {
         return Err(M3FlowError::not_found(format!("run '{run_id}'")));
     }
-    std::fs::write(dir.join("CANCEL"), "cancel requested\n")
-        .map_err(|e| M3FlowError::io(e, "writing CANCEL flag"))
+    let generation = crate::lease::current_generation(&dir);
+    std::fs::write(
+        dir.join("CANCEL"),
+        crate::executor::cancel_flag_body(generation),
+    )
+    .map_err(|e| M3FlowError::io(e, "writing CANCEL flag"))
+}
+
+/// Certified artifact types are only created by their gate task.
+fn refuse_protected(types: &TypeSet, artifact_type: &str) -> Result<()> {
+    if let Some((ptype, creator)) = types.protected(artifact_type) {
+        return Err(M3FlowError::schema(format!(
+            "'{artifact_type}' cannot be registered directly: {ptype} is a certified \
+             type created only by the '{creator}' task from a passing, bound report"
+        )));
+    }
+    Ok(())
 }
 
 fn recompile(registry: &Registry, rec: &WorkflowRunRecord) -> Result<CompiledWorkflow> {
@@ -428,6 +539,7 @@ fn register_input_file(
             path.display()
         )));
     }
+    refuse_protected(types, decl_type)?;
     if types.is_subtype(decl_type, "Spec") {
         let text = std::fs::read_to_string(path)
             .map_err(|e| M3FlowError::io(e, format!("reading {}", path.display())))?;
@@ -483,6 +595,7 @@ pub fn register_artifact(
             "unknown artifact type '{artifact_type}'"
         )));
     }
+    refuse_protected(registry.types(), artifact_type)?;
     let db = open_db(project)?;
     let store = open_store(project)?;
     let (artifact, rows) = store.register_files(artifact_type, paths, metadata, data, None)?;

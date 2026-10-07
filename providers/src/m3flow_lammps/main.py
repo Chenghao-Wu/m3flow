@@ -5,16 +5,24 @@ run_deform (tasks/lammps/*.yaml).
 
 Conventions:
   - canonical quantities arrive as {value, unit} in canonical units
-    (K, bar, fs); LAMMPS real units need atm for pressure (x0.986923)
-  - `units lj` systems (CG) map 1 tau = 1000 fs, so the duration/timestep
-    *ratio* (step count) is exact in both unit systems
+    (K, bar, fs); LAMMPS real units need atm for pressure (bar / 1.01325)
+  - only `units real` and `units lj` systems are supported; anything else is
+    rejected before a deck is written
+  - `units lj` systems (CG) carry no physical calibration. Inputs use a
+    fixed *convention*, not a mapping: 1 K == T* = 1, 1 bar == P* = 1 and
+    1 tau == 1000 fs (so the duration/timestep ratio, i.e. the step count,
+    is exact). Outputs of lj runs are labeled as reduced units
+    (`*_lj` thermo columns, `tau` time axes) and never as physical units.
+  - thermo output is never normalized per atom (`thermo_modify norm no`) so
+    energy columns are extensive totals in every unit style
+  - sampling metadata records the *actual* dump/thermo stride x timestep,
+    not the requested interval (they differ when interval/dt is not integer)
   - state chaining: every run ends with write_data (coeffs + velocities) and
     write_restart; the next deck re-reads them
 """
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import re
@@ -25,9 +33,16 @@ from pathlib import Path
 
 from m3flow_provider import (Provider, ProviderFailure, artifact, verdict)
 
-PROVIDER_VERSION = "0.3.2"
-ATM_PER_BAR = 0.986923
-FS_PER_TAU = 1000.0  # lj-time convention for CG systems
+PROVIDER_VERSION = "0.4.0"
+ATM_PER_BAR = 1.0 / 1.01325
+FS_PER_TAU = 1000.0  # lj-time convention for CG systems (not a calibration)
+SUPPORTED_UNITS = ("real", "lj")
+# LAMMPS pressure unit -> GPa ("real": atm). lj pressures stay reduced.
+GPA_PER_LAMMPS_PRESSURE = {"real": 101325.0e-9}
+THERMOSTATS = ("nose_hoover", "langevin", "berendsen")
+BAROSTATS = ("nose_hoover", "berendsen")
+CHECK_MARKER = "M3FLOW_CHECK_FAILED"
+CHARGE_MARKER = "M3FLOW_GROUP_CHARGE"
 
 
 # ------------------------------------------------------------------ engine
@@ -49,16 +64,26 @@ def _binary(req=None):
         "m3flow.yaml or put 'lmp' on PATH)")
 
 
-def _engine():
-    exe = _binary()
+def _engine(req=None):
+    """Descriptor of the binary that `execute` would actually launch.
+
+    Probes `_binary(req)` — the same resolution `_run_lammps` uses — so a
+    configured executable is fingerprinted instead of whatever `lmp` is on
+    PATH. The resolved path and compiled-in packages join the descriptor:
+    the runtime hashes all of it into cache keys.
+    """
+    exe = _binary(req)
     out = subprocess.run([exe, "-h"], capture_output=True, text=True, timeout=60)
     text = out.stdout + out.stderr
+    version = "unknown"
     for line in text.splitlines():
         if "Large-scale Atomic" in line:
             # "... Simulator - 22 Jul 2025 - Update 3"
-            version = line.split("Simulator", 1)[-1].strip(" -")
-            return {"name": "lammps", "version": version or line.strip()[:60]}
-    return {"name": "lammps", "version": "unknown"}
+            version = line.split("Simulator", 1)[-1].strip(" -") or line.strip()[:60]
+            break
+    return {"name": "lammps", "version": version,
+            "executable": str(Path(exe).resolve()),
+            "packages": sorted(_installed_packages(exe))}
 
 
 _PKG_CACHE: dict = {}
@@ -96,6 +121,11 @@ class Ctx:
         self.req = req
         self.params = req["parameters"]
         self.workdir = Path(req["workdir"])
+        self.warnings = []
+        # actual strides chosen by the deck builders (recorded in metadata)
+        self.thermo_every = None
+        self.dump_every = None
+        self.n_steps = None
         inputs = req["inputs"]
         sys_in, state_in = inputs.get("system"), inputs.get("state")
         if (sys_in is None) == (state_in is None):
@@ -106,6 +136,12 @@ class Ctx:
         src = state_in or sys_in
         meta = src.get("metadata") or {}
         self.units = meta.get("units", "real")
+        if self.units not in SUPPORTED_UNITS:
+            raise ProviderFailure(
+                "input_invalid", "input_error",
+                f"LAMMPS unit style '{self.units}' is not supported (supported: "
+                f"{', '.join(SUPPORTED_UNITS)}); decks would mis-scale time, "
+                "pressure and damping parameters")
         self.atom_style = meta.get("atom_style", "full")
         files = src.get("files") or {}
         if self.from_state:
@@ -136,36 +172,76 @@ class Ctx:
         return dest
 
     # quantity helpers (canonical units: K, bar, fs; unit field honored)
-    _TIME_TO_FS = {"fs": 1.0, "ps": 1e3, "ns": 1e6, "s": 1e15}
+    _TIME_TO_FS = {"fs": 1.0, "ps": 1e3, "ns": 1e6, "us": 1e9, "s": 1e15}
     _PRESS_TO_BAR = {"bar": 1.0, "atm": 1.01325, "kPa": 0.01, "MPa": 10.0,
-                     "GPa": 10000.0, "Pa": 1e-5}
+                     "GPa": 10000.0, "Pa": 1e-5, "psi": 0.0689476}
 
     def _q(self, name, default=None):
         q = self.params.get(name)
         return q if isinstance(q, dict) else ({"value": q, "unit": None} if q is not None else default)
 
+    @staticmethod
+    def _factor(table, unit, name, canonical):
+        unit = unit or canonical
+        if unit not in table:
+            raise ProviderFailure(
+                "input_invalid", "input_error",
+                f"parameter '{name}': unknown unit '{unit}' "
+                f"(accepted: {', '.join(table)})")
+        return table[unit]
+
     def temperature(self, name, default=None):
         q = self._q(name)
         return float(q["value"]) if q else default
 
-    def pressure_atm(self, name="pressure", default_bar=1.0):
+    def pressure_bar(self, name="pressure", default=None):
         q = self._q(name)
-        bar = float(q["value"]) * self._PRESS_TO_BAR.get(q.get("unit") or "bar", 1.0) if q else default_bar
-        return bar * ATM_PER_BAR
+        if not q:
+            return default
+        return float(q["value"]) * self._factor(self._PRESS_TO_BAR, q.get("unit"), name, "bar")
+
+    def pressure_lmp(self, name="pressure", default_bar=1.0):
+        """Pressure in the deck's unit style: atm (real) or reduced (lj,
+        by the 1 bar == P* = 1 input convention)."""
+        bar = self.pressure_bar(name, default_bar)
+        return bar if self.units == "lj" else bar * ATM_PER_BAR
 
     def time_fs(self, name, default=None):
         q = self._q(name)
         if not q:
             return default
-        return float(q["value"]) * self._TIME_TO_FS.get(q.get("unit") or "fs", 1.0)
+        return float(q["value"]) * self._factor(self._TIME_TO_FS, q.get("unit"), name, "fs")
+
+    def time_lmp(self, fs):
+        """fs -> deck time unit (fs for real, tau for lj)."""
+        return fs / FS_PER_TAU if self.units == "lj" else fs
+
+    def timestep_fs(self):
+        return self.time_fs("timestep", 1.0)
 
     def timestep_lammps(self):
-        dt = self.time_fs("timestep", 1.0)
-        return dt / FS_PER_TAU if self.units == "lj" else dt
+        return self.time_lmp(self.timestep_fs())
 
     def steps(self, duration_fs):
-        dt = self.time_fs("timestep", 1.0)
-        return max(1, int(round(duration_fs / dt)))
+        return max(1, int(round(duration_fs / self.timestep_fs())))
+
+    def stride(self, name, default_fs):
+        """Integer step stride for an output interval. The actual interval
+        (stride x dt) is what downstream analysis must use; a mismatch with
+        the request is reported as a warning, never hidden."""
+        want = self.time_fs(name, default_fs)
+        dt = self.timestep_fs()
+        every = max(1, int(round(want / dt)))
+        actual = every * dt
+        if not math.isclose(actual, want, rel_tol=1e-9, abs_tol=1e-12):
+            self.warnings.append(
+                f"{name}: requested {want:g} fs is not a multiple of the "
+                f"{dt:g} fs timestep; using every {every} steps = {actual:g} fs")
+        return every
+
+    def seed(self):
+        s = self.params.get("seed")
+        return 12345 if s is None else int(s)
 
 
 def _preamble(ctx):
@@ -183,23 +259,24 @@ def _preamble(ctx):
 
 
 def _thermo_block(ctx, extra_cols=None, extra_computes=None):
-    p = ctx.params
-    every_fs = ctx.time_fs("thermo_interval", 100.0)
-    every = max(1, int(round(every_fs / ctx.time_fs("timestep", 1.0))))
-    cols = ["step", "temp", "pe", "ke", "etotal", "press", "vol", "density", "enthalpy"]
+    every = ctx.stride("thermo_interval", 100.0)
+    ctx.thermo_every = every
+    cols = ["step", "temp", "pe", "ke", "etotal", "press", "vol", "density",
+            "enthalpy", "lx", "ly", "lz"]
     lines = []
     if extra_computes:
         lines += extra_computes
         cols += (extra_cols or [])
     lines.append("thermo_style custom " + " ".join(cols))
+    # extensive totals in every unit style (lj defaults to per-atom norm)
+    lines.append("thermo_modify norm no")
     lines.append(f"thermo {every}")
     return lines
 
 
 def _dump_block(ctx, name="traj.dcd"):
-    p = ctx.params
-    every_fs = ctx.time_fs("sampling_interval", 1000.0)
-    every = max(1, int(round(every_fs / ctx.time_fs("timestep", 1.0))))
+    every = ctx.stride("sampling_interval", 1000.0)
+    ctx.dump_every = every
     return [
         f"dump m3d all dcd {every} {name}",
         "dump_modify m3d unwrap yes",
@@ -213,22 +290,88 @@ def _finalize(ctx):
     ]
 
 
-def _interaction_block(ctx):
-    """Optional group/group interaction energy compute."""
+def _input_kspace_style(ctx):
+    """The kspace_style declared by the staged input decks, or None."""
+    style = None
+    for name in (ctx.init_file, getattr(ctx, "settings_file", None)):
+        if not name:
+            continue
+        path = ctx.workdir / name
+        if not path.is_file():
+            continue
+        for ln in path.read_text(errors="replace").splitlines():
+            tok = ln.split("#", 1)[0].split()
+            if len(tok) >= 2 and tok[0] == "kspace_style":
+                style = None if tok[1] == "none" else tok[1]
+    return style
+
+
+def _interaction_spec(ctx):
+    """Normalized `interaction` parameter, or None.
+
+    kspace: "auto" (default) includes the long-range part whenever the input
+    declares a kspace_style — compute group/group defaults to kspace=no,
+    which silently drops long-range electrostatics for charged interfaces.
+    """
     spec = ctx.params.get("interaction")
     if not spec:
-        return [], []
+        return None
     ga, gb = spec.get("group_a"), spec.get("group_b")
     if not (ga and gb):
+        raise ProviderFailure(
+            "input_invalid", "input_error",
+            "interaction needs both 'group_a' and 'group_b' LAMMPS group selectors")
+    kspace = spec.get("kspace", "auto")
+    declared = _input_kspace_style(ctx)
+    if kspace in ("auto", None):
+        kspace = declared is not None
+    elif isinstance(kspace, str):
+        kspace = kspace.lower() in ("yes", "true", "on")
+    else:
+        kspace = bool(kspace)
+    if kspace and declared is None:
+        raise ProviderFailure(
+            "input_invalid", "input_error",
+            "interaction.kspace requested but the input defines no kspace_style")
+    return {"group_a": ga, "group_b": gb, "kspace": kspace,
+            "kspace_style": declared}
+
+
+def _interaction_block(ctx):
+    """Optional group/group interaction energy computes.
+
+    Emits the pair part (and the kspace part when enabled) as separate
+    columns, aborts the run when the groups overlap (group/group would count
+    intra-group pairs), and prints each group's net charge for provenance.
+    """
+    spec = _interaction_spec(ctx)
+    if not spec:
         return [], []
     lines = [
-        f"group m3_ga {ga}",
-        f"group m3_gb {gb}",
-        # compute ID g1 group/group g2 (pairwise only; kspace excluded,
-        # the standard convention for interfacial E_int)
-        "compute m3_eint m3_ga group/group m3_gb",
+        f"group m3_ga {spec['group_a']}",
+        f"group m3_gb {spec['group_b']}",
+        "group m3_gab intersect m3_ga m3_gb",
+        "variable m3_nab equal count(m3_gab)",
+        f"if \"${{m3_nab}} > 0\" then \"print '{CHECK_MARKER}: interaction "
+        f"groups overlap in ${{m3_nab}} atoms'\" \"quit 3\"",
+        "variable m3_na equal count(m3_ga)",
+        "variable m3_nb equal count(m3_gb)",
+        f"if \"${{m3_na}} == 0 || ${{m3_nb}} == 0\" then \"print '{CHECK_MARKER}: "
+        f"interaction group is empty (a=${{m3_na}}, b=${{m3_nb}})'\" \"quit 3\"",
     ]
-    return lines, ["c_m3_eint"]
+    if ctx.atom_style in ("full", "charge"):
+        lines += [
+            "variable m3_qa equal charge(m3_ga)",
+            "variable m3_qb equal charge(m3_gb)",
+            f"print \"{CHARGE_MARKER} ${{m3_qa}} ${{m3_qb}}\"",
+        ]
+    lines.append("compute m3_eint m3_ga group/group m3_gb pair yes kspace no")
+    cols = ["c_m3_eint"]
+    if spec["kspace"]:
+        lines.append("compute m3_eintk m3_ga group/group m3_gb pair no kspace yes")
+        cols.append("c_m3_eintk")
+    ctx.interaction = spec
+    return lines, cols
 
 
 # ------------------------------------------------------------------ decks
@@ -241,8 +384,7 @@ def _velocity_if_needed(ctx, temperature):
             "input_invalid", "input_error",
             "velocity initialization needs a temperature when starting from "
             "a SimulationSystem")
-    seed = int(ctx.params.get("seed") or 12345)
-    return [f"velocity all create {temperature} {seed} mom yes rot yes"]
+    return [f"velocity all create {temperature} {ctx.seed()} mom yes rot yes"]
 
 
 def deck_minimize(ctx):
@@ -251,11 +393,10 @@ def deck_minimize(ctx):
     relax_fs = ctx.time_fs("relax_duration", 0.0)
     if relax_fs and relax_fs > 0:
         t_relax = ctx.temperature("relax_temperature", 10.0)
-        seed = int(p.get("seed") or 12345)
         lines += _velocity_if_needed(ctx, t_relax)
         lines += [
             f"fix m3rlx all nve/limit 0.1",
-            f"fix m3lan all langevin {t_relax} {t_relax} 100.0 {seed}",
+            f"fix m3lan all langevin {t_relax} {t_relax} {ctx.time_lmp(100.0)} {ctx.seed()}",
             f"timestep {ctx.timestep_lammps()}",
             f"run {ctx.steps(relax_fs)}",
             "unfix m3rlx",
@@ -271,24 +412,30 @@ def deck_minimize(ctx):
     return lines, False
 
 
-def _pressure_clause(ctx, pdamp_lmp):
-    """Barostat keyword clause for fix npt / fix press/berendsen.
+def _pressure_clause(ctx, pdamp_lmp, barostat="nose_hoover"):
+    """Barostat keyword clause for fix npt / nph / press/berendsen.
 
     iso|aniso|tri -> "{style} Pstart Pstop Pdamp" (Pstop = pressure_end or
     Pstart). xyz -> per-axis "x Px0 Px1 Pdamp ..." clauses plus a trailing
     "couple <mode>"; axes without a pressure_<axis> parameter are not
-    barostated (LAMMPS semantics).
+    barostated (LAMMPS semantics). fix press/berendsen has no `tri`.
     """
     p = ctx.params
     style = p.get("pressure_style") or "iso"
     couple = p.get("couple")
+    if barostat == "berendsen" and style == "tri":
+        raise ProviderFailure(
+            "input_invalid", "input_error",
+            "pressure_style 'tri' needs the nose_hoover barostat: LAMMPS fix "
+            "press/berendsen cannot control triclinic tilt")
     if style == "xyz":
         parts = []
         for axis in ("x", "y", "z"):
             if ctx._q(f"pressure_{axis}") is None:
                 continue
-            a0 = ctx.pressure_atm(f"pressure_{axis}")
-            a1 = ctx.pressure_atm(f"pressure_{axis}_end", a0 / ATM_PER_BAR)
+            b0 = ctx.pressure_bar(f"pressure_{axis}")
+            a0 = ctx.pressure_lmp(f"pressure_{axis}")
+            a1 = ctx.pressure_lmp(f"pressure_{axis}_end", b0)
             parts.append(f"{axis} {a0} {a1} {pdamp_lmp}")
         if not parts:
             raise ProviderFailure(
@@ -304,58 +451,102 @@ def _pressure_clause(ctx, pdamp_lmp):
         raise ProviderFailure(
             "input_invalid", "input_error",
             "pressure_x/y/z are only valid with pressure_style 'xyz'")
-    p0 = ctx.pressure_atm("pressure")
-    p1 = ctx.pressure_atm("pressure_end", p0 / ATM_PER_BAR)
+    b0 = ctx.pressure_bar("pressure", 1.0)
+    p0 = ctx.pressure_lmp("pressure")
+    p1 = ctx.pressure_lmp("pressure_end", b0)
     return f"{style} {p0} {p1} {pdamp_lmp}"
 
 
-def deck_run(ctx, ensemble):
-    p = ctx.params
-    lines = _preamble(ctx)
-    t0 = ctx.temperature("temperature")
-    t1 = ctx.temperature("temperature_end") or t0
-    tdamp = ctx.time_fs("tdamp", 100.0)
-    pdamp = ctx.time_fs("pdamp", 1000.0)
-    if ctx.units == "lj":
-        tdamp_lmp, pdamp_lmp = tdamp / FS_PER_TAU, pdamp / FS_PER_TAU
-    else:
-        tdamp_lmp, pdamp_lmp = tdamp, pdamp
-    seed = int(p.get("seed") or 12345)
+def _ensemble_fixes(ctx, ensemble):
+    """[(fix_id, fix_command)] for an MD run.
 
+    Every supported thermostat/barostat pair maps to an explicit fix set;
+    the deck's unfix lines are derived from this list, never re-guessed.
+
+      thermostat   barostat     fixes
+      nose_hoover  nose_hoover  npt
+      langevin     nose_hoover  nph + langevin
+      berendsen    nose_hoover  nph + temp/berendsen
+      nose_hoover  berendsen    nvt + press/berendsen
+      langevin     berendsen    nve + langevin + press/berendsen
+      berendsen    berendsen    nve + temp/berendsen + press/berendsen
+    """
     if ensemble == "nve":
-        lines += _velocity_if_needed(ctx, t0)
-        lines.append("fix m3 all nve")
-    else:
-        lines += _velocity_if_needed(ctx, t0)
-        tstat = p.get("thermostat") or "nose_hoover"
-        if ensemble == "nvt":
-            if tstat == "langevin":
-                lines += [f"fix m3 all nve",
-                          f"fix m3t all langevin {t0} {t1} {tdamp_lmp} {seed}"]
-            elif tstat == "berendsen":
-                lines += [f"fix m3 all nve",
-                          f"fix m3t all temp/berendsen {t0} {t1} {tdamp_lmp}"]
-            else:
-                lines.append(f"fix m3 all nvt temp {t0} {t1} {tdamp_lmp}")
-        elif ensemble == "npt":
-            bstat = p.get("barostat") or "nose_hoover"
-            pclause = _pressure_clause(ctx, pdamp_lmp)
-            if tstat == "langevin" or bstat == "berendsen":
-                # mixed ensembles: langevin + press/berendsen
-                if tstat == "langevin":
-                    lines += ["fix m3 all nve",
-                              f"fix m3t all langevin {t0} {t1} {tdamp_lmp} {seed}"]
-                else:
-                    lines.append(f"fix m3 all nvt temp {t0} {t1} {tdamp_lmp}")
-                if bstat == "berendsen":
-                    lines.append(f"fix m3p all press/berendsen {pclause}")
-            else:
-                lines.append(
-                    f"fix m3 all npt temp {t0} {t1} {tdamp_lmp} {pclause}")
+        return [("m3", "fix m3 all nve")]
+    p = ctx.params
+    t0 = ctx.temperature("temperature")
+    if t0 is None:
+        raise ProviderFailure("input_invalid", "input_error",
+                              f"{ensemble} run requires parameter 'temperature'")
+    t1 = ctx.temperature("temperature_end") or t0
+    tdamp = ctx.time_lmp(ctx.time_fs("tdamp", 100.0))
+    tstat = p.get("thermostat") or "nose_hoover"
+    if tstat not in THERMOSTATS:
+        raise ProviderFailure("input_invalid", "input_error",
+                              f"unknown thermostat '{tstat}' (use {', '.join(THERMOSTATS)})")
 
+    def thermostat_only():  # velocity-rescaling fix on top of an integrator
+        if tstat == "langevin":
+            return ("m3t", f"fix m3t all langevin {t0} {t1} {tdamp} {ctx.seed()}")
+        return ("m3t", f"fix m3t all temp/berendsen {t0} {t1} {tdamp}")
+
+    if ensemble == "nvt":
+        if tstat == "nose_hoover":
+            return [("m3", f"fix m3 all nvt temp {t0} {t1} {tdamp}")]
+        return [("m3", "fix m3 all nve"), thermostat_only()]
+
+    if ensemble != "npt":
+        raise ProviderFailure("input_invalid", "input_error",
+                              f"unknown ensemble '{ensemble}'")
+    bstat = p.get("barostat") or "nose_hoover"
+    if bstat not in BAROSTATS:
+        raise ProviderFailure("input_invalid", "input_error",
+                              f"unknown barostat '{bstat}' (use {', '.join(BAROSTATS)})")
+    pdamp = ctx.time_lmp(ctx.time_fs("pdamp", 1000.0))
+    pclause = _pressure_clause(ctx, pdamp, barostat=bstat)
+    if bstat == "nose_hoover":
+        if tstat == "nose_hoover":
+            return [("m3", f"fix m3 all npt temp {t0} {t1} {tdamp} {pclause}")]
+        return [("m3", f"fix m3 all nph {pclause}"), thermostat_only()]
+    if tstat == "nose_hoover":
+        fixes = [("m3", f"fix m3 all nvt temp {t0} {t1} {tdamp}")]
+    else:
+        fixes = [("m3", "fix m3 all nve"), thermostat_only()]
+    fixes.append(("m3p", f"fix m3p all press/berendsen {pclause}{_berendsen_modulus(ctx)}"))
+    return fixes
+
+
+# press/berendsen rescales by dt/Pdamp * dP/modulus per step; LAMMPS's
+# default modulus (10 pressure units) suits lj but makes atm-unit systems
+# blow up (a 250 atm imbalance rescales the volume by ~5% per step).
+REAL_BERENDSEN_MODULUS_BAR = 20000.0  # ~2 GPa, liquids / polymer melts
+
+
+def _berendsen_modulus(ctx):
+    """` modulus <K>` clause: the berendsen_modulus parameter, else ~2 GPa
+    for real units (overestimating K only slows the barostat; an
+    underestimate destabilizes it), else the LAMMPS default for lj."""
+    bar = ctx.pressure_bar("berendsen_modulus")
+    if bar is None and ctx.units == "real":
+        bar = REAL_BERENDSEN_MODULUS_BAR
+    if bar is None:
+        return ""
+    if bar <= 0:
+        raise ProviderFailure("input_invalid", "input_error",
+                              "berendsen_modulus must be positive")
+    return f" modulus {bar if ctx.units == 'lj' else bar * ATM_PER_BAR}"
+
+
+def deck_run(ctx, ensemble):
+    lines = _preamble(ctx)
+    lines += _velocity_if_needed(ctx, ctx.temperature("temperature"))
+    fixes = _ensemble_fixes(ctx, ensemble)
+    lines += [cmd for _, cmd in fixes]
+    created = [fid for fid, _ in fixes]
     if ensemble in ("nvt", "npt"):
         # remove net linear + angular momentum drift during equilibration
         lines.append("fix m3mom all momentum 1000 linear 1 1 1 angular")
+        created.append("m3mom")
 
     extra_computes, extra_cols = _interaction_block(ctx)
     lines += _thermo_block(ctx, extra_cols=extra_cols, extra_computes=extra_computes)
@@ -366,71 +557,84 @@ def deck_run(ctx, ensemble):
     if not duration:
         raise ProviderFailure("input_invalid", "input_error",
                               "run task requires parameter 'duration'")
-    lines.append(f"run {ctx.steps(duration)}")
-    if ensemble in ("nvt", "npt") and (p.get("thermostat") in ("langevin", "berendsen")
-                                       or p.get("barostat") == "berendsen"):
-        lines += ["unfix m3", "unfix m3t"] + (["unfix m3p"] if "m3p" in " ".join(lines) else [])
-    else:
-        lines.append("unfix m3")
-    if ensemble in ("nvt", "npt"):
-        lines.append("unfix m3mom")
+    ctx.n_steps = ctx.steps(duration)
+    lines.append(f"run {ctx.n_steps}")
+    lines += [f"unfix {fid}" for fid in reversed(created)]
     lines += _finalize(ctx)
     return lines, True
 
 
 def deck_soft_pushoff(ctx):
-    p = ctx.params
     lines = _preamble(ctx)
     t = ctx.temperature("temperature", 300.0)
-    seed = int(p.get("seed") or 12345)
     duration = ctx.time_fs("duration")
     if not duration:
         raise ProviderFailure("input_invalid", "input_error",
                               "run_soft_pushoff requires 'duration'")
     steps = ctx.steps(duration)
+    ctx.n_steps = steps
     lines += _velocity_if_needed(ctx, t)
-    tdamp = 100.0 / FS_PER_TAU if ctx.units == "lj" else 100.0
     lines += [
         "variable m3pref equal ramp(0.0,1.0)",
         # soften pair interactions, ramping to full over the run
         "fix m3soft all adapt 0 pair lj/cut epsilon * * v_m3pref scale yes",
         "fix m3 all nve/limit 0.05",
-        f"fix m3t all langevin {t} {t} {tdamp} {seed}",
+        f"fix m3t all langevin {t} {t} {ctx.time_lmp(100.0)} {ctx.seed()}",
     ]
     lines += _thermo_block(ctx)
     lines.append(f"timestep {ctx.timestep_lammps()}")
     lines.append(f"run {steps}")
-    lines += ["unfix m3soft", "unfix m3", "unfix m3t"]
+    lines += ["unfix m3t", "unfix m3", "unfix m3soft"]
     lines += _finalize(ctx)
     return lines, False
 
 
 def deck_deform(ctx):
+    """Uniaxial constant-engineering-strain-rate deformation.
+
+    Strain is measured from the box (L - L0)/L0, so it is exact whatever the
+    unit style; atoms are remapped with the box (`remap x`, the default for
+    solid deformation — `remap v` is for SLLOD flows and would make the
+    thermostat fight the imposed velocity profile).
+    """
     p = ctx.params
     lines = _preamble(ctx)
     t = ctx.temperature("temperature")
-    seed = int(p.get("seed") or 12345)
+    if t is None:
+        raise ProviderFailure("input_invalid", "input_error",
+                              "run_deform requires parameter 'temperature'")
     direction = p.get("direction") or "z"
-    erate = float(p.get("strain_rate") or 1e-7)  # 1/fs
-    max_strain = float(p.get("max_strain") or 0.5)
-    dt = ctx.time_fs("timestep", 1.0)
+    if direction not in ("x", "y", "z"):
+        raise ProviderFailure("input_invalid", "input_error",
+                              f"direction must be x, y or z (got {direction!r})")
+    erate = float(p["strain_rate"]) if p.get("strain_rate") is not None else 1e-7  # 1/fs
+    max_strain = float(p["max_strain"]) if p.get("max_strain") is not None else 0.5
+    if erate <= 0 or max_strain <= 0:
+        raise ProviderFailure("input_invalid", "input_error",
+                              "strain_rate and max_strain must be positive")
+    dt = ctx.timestep_fs()
     steps = max(1, int(round(max_strain / (erate * dt))))
-    tdamp = ctx.time_fs("tdamp", 100.0)
+    ctx.n_steps = steps
+    tdamp = ctx.time_lmp(ctx.time_fs("tdamp", 100.0))
+    erate_lmp = erate * FS_PER_TAU if ctx.units == "lj" else erate  # 1/time unit
 
     lines += _velocity_if_needed(ctx, t)
-    every_fs = ctx.time_fs("sampling_interval", 500.0)
-    every = max(1, int(round(every_fs / dt)))
+    every = ctx.stride("sampling_interval", 500.0)
+    ctx.dump_every = every
     lines += [
-        f"fix m3def all deform 1 {direction} erate {erate} remap v units box",
+        f"variable m3tmp equal l{direction}",
+        "variable m3L0 equal ${m3tmp}",
+        f"fix m3def all deform 1 {direction} erate {erate_lmp} remap x units box",
         f"fix m3 all nvt temp {t} {t} {tdamp}",
-        f"variable m3strain equal (step*{dt}*{erate})",
+        f"variable m3strain equal (l{direction}-v_m3L0)/v_m3L0",
         f"variable m3stress equal -p{direction}{direction}",
         f"fix m3out all print {every} \"${{m3strain}} ${{m3stress}}\" "
         f"file stress_strain.csv screen no",
         f"timestep {ctx.timestep_lammps()}",
         f"run {steps}",
-        "unfix m3def",
+        "unfix m3out",
         "unfix m3",
+        "unfix m3def",
     ]
     lines += _finalize(ctx)
     return lines, False
@@ -582,6 +786,11 @@ def _run_lammps(ctx, deck_lines, has_trajectory):
 def _classify_failure(returncode, log_text, stderr_tail=""):
     tail = "\n".join(log_text.splitlines()[-40:])
     combined = log_text + "\n" + stderr_tail
+    m = re.search(rf"^{CHECK_MARKER}:\s*(.+)$", log_text, re.M)
+    if m:
+        raise ProviderFailure("input_invalid", "input_error",
+                              f"pre-run check failed: {m.group(1).strip()}",
+                              recoverable=False, raw_log=tail)
     if "Lost atoms" in log_text:
         raise ProviderFailure("lost_atoms", "execution_error",
                               "LAMMPS lost atoms during the run",
@@ -639,6 +848,16 @@ def _parse_thermo(log_text):
     return {"columns": cols, "rows": rows} if rows else None
 
 
+def _parse_group_charges(log_text):
+    m = re.search(rf"^{CHARGE_MARKER}\s+(\S+)\s+(\S+)", log_text, re.M)
+    if not m:
+        return None
+    try:
+        return [float(m.group(1)), float(m.group(2))]
+    except ValueError:
+        return None
+
+
 def _dcd_frames(path):
     try:
         with open(path, "rb") as f:
@@ -650,39 +869,61 @@ def _dcd_frames(path):
         return 0
 
 
+# thermo keyword -> (quantity, real-units suffix); lj columns get "_lj"
+_THERMO_COLUMNS = {
+    "Temp": ("temp", "K"), "Press": ("press", "atm"), "Volume": ("vol", "A3"),
+    "Density": ("density", "g_cm3"), "PotEng": ("pe", "kcal_mol"),
+    "KinEng": ("ke", "kcal_mol"), "TotEng": ("etotal", "kcal_mol"),
+    "Enthalpy": ("enthalpy", "kcal_mol"), "Lx": ("lx", "A"),
+    "Ly": ("ly", "A"), "Lz": ("lz", "A"),
+    "c_m3_eint": ("e_interaction_pair", "kcal_mol"),
+    "c_m3_eintk": ("e_interaction_kspace", "kcal_mol"),
+}
+
+
+def _thermo_column_name(ctx, keyword):
+    quantity, real_unit = _THERMO_COLUMNS[keyword]
+    return f"{quantity}_{'lj' if ctx.units == 'lj' else real_unit}"
+
+
 def _write_thermo_csv(ctx, thermo, dest="thermo.csv"):
-    dt_fs = ctx.time_fs("timestep", 1.0)
-    colmap = {"Step": "step", "Temp": "temp_K", "Press": "press_atm",
-              "Volume": "vol_A3", "Density": "density_g_cm3", "PotEng": "pe_kcal_mol",
-              "KinEng": "ke_kcal_mol", "TotEng": "etotal_kcal_mol",
-              "Enthalpy": "enthalpy_kcal_mol", "c_m3_eint": "e_interaction_kcal_mol"}
-    out_cols = ["time_fs"]
-    keep = []
-    for i, c in enumerate(thermo["columns"]):
-        if c == "Step":
-            keep.append((i, None))
-        elif c in colmap:
-            keep.append((i, colmap[c]))
-            out_cols.append(colmap[c])
+    """Thermo block -> CSV with unit-tagged columns.
+
+    real: time_fs + <q>_<physical unit>; lj: time_tau + <q>_lj (reduced).
+    With an interaction compute, e_interaction_<unit> is the total
+    (pair + kspace when computed) next to its components.
+    """
+    dt_fs = ctx.timestep_fs()
+    lj = ctx.units == "lj"
+    time_col, time_scale = ("time_tau", dt_fs / FS_PER_TAU) if lj else ("time_fs", dt_fs)
+    cols = thermo["columns"]
+    keep = [(i, _thermo_column_name(ctx, c)) for i, c in enumerate(cols)
+            if c in _THERMO_COLUMNS]
+    step_i = cols.index("Step") if "Step" in cols else None
+    pair_i = cols.index("c_m3_eint") if "c_m3_eint" in cols else None
+    kspace_i = cols.index("c_m3_eintk") if "c_m3_eintk" in cols else None
+    out_cols = ([time_col] if step_i is not None else []) + [n for _, n in keep]
+    if pair_i is not None:
+        out_cols.append(f"e_interaction_{'lj' if lj else 'kcal_mol'}")
     lines = [",".join(out_cols)]
     for row in thermo["rows"]:
         vals = []
-        for i, name in keep:
-            if name is None:
-                vals.append(f"{row[i] * dt_fs:.1f}")
-                        # step -> time
-            else:
-                vals.append(f"{row[i]:.6g}")
+        if step_i is not None:
+            vals.append(f"{row[step_i] * time_scale:.10g}")
+        vals += [f"{row[i]:.10g}" for i, _ in keep]
+        if pair_i is not None:
+            total = row[pair_i] + (row[kspace_i] if kspace_i is not None else 0.0)
+            vals.append(f"{total:.10g}")
         lines.append(",".join(vals))
     Path(ctx.workdir / dest).write_text("\n".join(lines) + "\n")
-    return dest, len(thermo["rows"])
+    return dest, len(thermo["rows"]), out_cols
 
 
 # ------------------------------------------------------------------ outputs + validation
 
 def _common_validation(ctx, log_text, has_trajectory, traj_name="traj.dcd"):
     completed = "Total wall time" in log_text
-    nan = "nan" in log_text.lower()
+    nan = re.search(r"\bnan\b", log_text, re.I) is not None
     lost = "Lost atoms" in log_text
     out = [
         verdict("simulation_completed", completed,
@@ -698,6 +939,16 @@ def _common_validation(ctx, log_text, has_trajectory, traj_name="traj.dcd"):
     return out
 
 
+def _unit_manifest(ctx):
+    """How to read every number this run emits."""
+    if ctx.units == "lj":
+        return {"units": "lj", "time_unit": "tau",
+                "reduced_input_convention": {"fs_per_tau": FS_PER_TAU,
+                                             "temperature": "1 K == T* = 1",
+                                             "pressure": "1 bar == P* = 1"}}
+    return {"units": "real", "time_unit": "fs"}
+
+
 def _state_artifact(ctx, meta_extra=None):
     meta = dict(ctx.req["inputs"].get("state") or ctx.req["inputs"]["system"]).get("metadata") or {}
     meta = {**meta, **(meta_extra or {})}
@@ -705,32 +956,78 @@ def _state_artifact(ctx, meta_extra=None):
     return artifact("SimulationState", files=files, metadata=meta)
 
 
+def _run_record(ctx):
+    """Actual (not requested) step counts and durations of the run."""
+    dt = ctx.timestep_fs()
+    rec = {"timestep_fs": dt}
+    if ctx.n_steps is not None:
+        rec["n_steps"] = ctx.n_steps
+        rec["duration_fs"] = ctx.n_steps * dt
+    return rec
+
+
+def _thermo_artifact(ctx, thermo, ensemble):
+    csv, n_rows, out_cols = _write_thermo_csv(ctx, thermo)
+    dt = ctx.timestep_fs()
+    meta = {**_unit_manifest(ctx), **_run_record(ctx),
+            "ensemble": ensemble,
+            "thermo_norm": False,
+            "temperature_K": ctx.temperature("temperature"),
+            "pressure_bar": ctx.pressure_bar("pressure")}
+    if ctx.thermo_every:
+        meta["thermo_stride"] = ctx.thermo_every
+        meta["thermo_interval_fs"] = ctx.thermo_every * dt
+    if ensemble in ("nvt", "npt"):
+        meta["thermostat"] = ctx.params.get("thermostat") or "nose_hoover"
+    if ensemble == "npt":
+        meta["barostat"] = ctx.params.get("barostat") or "nose_hoover"
+    interaction = getattr(ctx, "interaction", None)
+    if interaction:
+        meta["interaction"] = {
+            "group_a": interaction["group_a"], "group_b": interaction["group_b"],
+            "kspace_included": interaction["kspace"],
+            "kspace_style": interaction["kspace_style"],
+            "group_charges": getattr(ctx, "group_charges", None),
+            "observable": "group/group interaction energy (pair"
+                          + (" + kspace" if interaction["kspace"] else " only") + ")",
+        }
+    return artifact("ThermodynamicSeries", files={"csv": csv}, metadata=meta,
+                    data={"columns": out_cols, "lammps_columns": thermo["columns"],
+                          "n_rows": n_rows})
+
+
 def _run_outputs(ctx, has_trajectory, thermo, request_meta_extra=None):
+    ensemble = (request_meta_extra or {}).get("ensemble")
     outputs = {"state": _state_artifact(ctx, request_meta_extra)}
     if has_trajectory:
         n_frames = _dcd_frames(ctx.workdir / "traj.dcd")
+        dt = ctx.timestep_fs()
+        stride = ctx.dump_every or 1
+        meta = {
+            **_unit_manifest(ctx), **_run_record(ctx),
+            "format": "dcd",
+            "topology_format": "lammps_data",
+            "coordinates": "unwrapped",
+            "dump_stride": stride,
+            "frame_interval_fs": stride * dt,
+        }
+        if ctx.units == "lj":
+            meta["frame_interval_tau"] = stride * dt / FS_PER_TAU
         outputs["trajectory"] = artifact(
             "Trajectory",
             files={"dcd": "traj.dcd", "topology": ctx.data_file},
-            metadata={
-                "format": "dcd",
-                "topology_format": "lammps_data",
-                "units": ctx.units,
-                "timestep_fs": ctx.time_fs("timestep", 1.0),
-                "frame_interval_fs": ctx.time_fs("sampling_interval", 1000.0),
-            },
+            metadata=meta,
             data={"n_frames": n_frames})
     outputs["log"] = artifact("SimulationLog", files={"log": "log.lammps"})
     if thermo:
-        csv, n_rows = _write_thermo_csv(ctx, thermo)
-        outputs["thermo"] = artifact(
-            "ThermodynamicSeries",
-            files={"csv": csv},
-            metadata={"ensemble": request_meta_extra.get("ensemble") if request_meta_extra else None,
-                      "temperature_K": ctx.temperature("temperature"),
-                      "pressure_bar": (ctx.params.get("pressure") or {}).get("value")},
-            data={"columns": thermo["columns"], "n_rows": n_rows})
+        outputs["thermo"] = _thermo_artifact(ctx, thermo, ensemble)
     return outputs
+
+
+def _finish(ctx, result):
+    if ctx.warnings:
+        result["warnings"] = list(ctx.warnings)
+    return result
 
 
 # ------------------------------------------------------------------ task handlers
@@ -747,10 +1044,11 @@ def _run_task(req, ensemble):
         deck, has_traj = deck_run(ctx, ensemble)
         extra = {"ensemble": ensemble}
     log_text = _run_lammps(ctx, deck, has_traj)
+    ctx.group_charges = _parse_group_charges(log_text)
     thermo = None if ensemble in ("minimize",) else _parse_thermo(log_text)
     outputs = _run_outputs(ctx, has_traj, thermo, extra)
     validation = _common_validation(ctx, log_text, has_traj)
-    return {"outputs": outputs, "validation": validation}
+    return _finish(ctx, {"outputs": outputs, "validation": validation})
 
 
 def energy_minimize(req):
@@ -761,8 +1059,8 @@ def energy_minimize(req):
         "state": _state_artifact(ctx, {"ensemble": "minimize"}),
         "log": artifact("SimulationLog", files={"log": "log.lammps"}),
     }
-    return {"outputs": outputs,
-            "validation": _common_validation(ctx, log_text, False)}
+    return _finish(ctx, {"outputs": outputs,
+                         "validation": _common_validation(ctx, log_text, False)})
 
 
 def run_nvt(req):
@@ -787,47 +1085,54 @@ def run_soft_pushoff(req):
         "log": artifact("SimulationLog", files={"log": "log.lammps"}),
     }
     if thermo:
-        csv, n_rows = _write_thermo_csv(ctx, thermo)
-        outputs["thermo"] = artifact("ThermodynamicSeries", files={"csv": csv},
-                                     metadata={"ensemble": "soft_pushoff"},
-                                     data={"columns": thermo["columns"], "n_rows": n_rows})
-    return {"outputs": outputs,
-            "validation": _common_validation(ctx, log_text, False)}
+        outputs["thermo"] = _thermo_artifact(ctx, thermo, "soft_pushoff")
+    return _finish(ctx, {"outputs": outputs,
+                         "validation": _common_validation(ctx, log_text, False)})
 
 
 def run_deform(req):
     ctx = Ctx(req)
     deck, _ = deck_deform(ctx)
     log_text = _run_lammps(ctx, deck, False)
-    # stress_strain.csv written by fix print: "strain stress_atm" per line
+    # stress_strain.csv written by fix print: "strain stress" per line, the
+    # stress in the deck's pressure unit (atm for real, reduced for lj)
+    to_gpa = GPA_PER_LAMMPS_PRESSURE.get(ctx.units)
+    stress_col, stress_unit = ("stress_GPa", "GPa") if to_gpa else ("stress_lj", "lj")
     series_path = ctx.workdir / "stress_strain.csv"
-    strain, stress_gpa = [], []
+    strain, stress = [], []
     if series_path.is_file():
         for ln in series_path.read_text().splitlines():
             parts = ln.split()
             if len(parts) >= 2 and not ln.startswith("#"):
                 try:
-                    strain.append(float(parts[0]))
-                    stress_gpa.append(float(parts[1]) * 101325e-9 * 1000)  # atm -> GPa
+                    s, sig = float(parts[0]), float(parts[1])
                 except ValueError:
                     continue
+                strain.append(s)
+                stress.append(sig * to_gpa if to_gpa else sig)
+    dt = ctx.timestep_fs()
     outputs = {
         "state": _state_artifact(ctx, {"ensemble": "deform"}),
         "series": artifact(
             "StressStrainSeries",
             files={"csv": "stress_strain_series.csv"},
-            metadata={"direction": ctx.params.get("direction") or "z",
-                      "stress_unit": "GPa"},
+            metadata={**_unit_manifest(ctx), **_run_record(ctx),
+                      "direction": ctx.params.get("direction") or "z",
+                      "stress_unit": stress_unit,
+                      "stress_column": stress_col,
+                      "strain_definition": "engineering, (L - L0)/L0 from the box",
+                      "sample_stride": ctx.dump_every,
+                      "sample_interval_fs": (ctx.dump_every or 1) * dt},
             data={"n_points": len(strain)}),
         "log": artifact("SimulationLog", files={"log": "log.lammps"}),
     }
     # normalize into a real csv with headers
     with open(ctx.workdir / "stress_strain_series.csv", "w") as f:
-        f.write("strain,stress_GPa\n")
-        for s, g in zip(strain, stress_gpa):
-            f.write(f"{s:.6f},{g:.6f}\n")
-    return {"outputs": outputs,
-            "validation": _common_validation(ctx, log_text, False)}
+        f.write(f"strain,{stress_col}\n")
+        for s, g in zip(strain, stress):
+            f.write(f"{s:.8g},{g:.8g}\n")
+    return _finish(ctx, {"outputs": outputs,
+                         "validation": _common_validation(ctx, log_text, False)})
 
 
 # ------------------------------------------------------------------ plumbing
@@ -844,7 +1149,10 @@ def cli():
             "run_nve": run_nve,
             "run_soft_pushoff": run_soft_pushoff,
             "run_deform": run_deform,
-        })
+        },
+        # MPI rank count / launcher only change the domain decomposition;
+        # GPU backends run different kernels and stay in the cache key.
+        scheduling_config_keys=("np", "mpi", "launcher"))
     raise SystemExit(provider.cli())
 
 

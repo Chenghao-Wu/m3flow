@@ -1,7 +1,7 @@
 schema: task/v1
 
 name: compute_rg
-version: 1.0.0
+version: 1.1.0
 
 description: >
   Radius of gyration statistics of polymer chains (identified by molecule id)
@@ -23,6 +23,13 @@ parameters:
   equilibration_fraction:
     type: number
     default: 0.5
+    description: Fraction of frames discarded from the start; 0 <= f < 1.
+  polymer_selection:
+    type: string
+    description: >
+      MDAnalysis selection of the polymer atoms (default: all). Every
+      bond-connected fragment of the selection is one chain, so mixtures,
+      solvent and substrates must be excluded here.
 
 outputs:
   result:

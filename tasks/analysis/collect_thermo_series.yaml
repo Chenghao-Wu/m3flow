@@ -1,7 +1,7 @@
 schema: task/v1
 
 name: collect_thermo_series
-version: 1.0.0
+version: 1.1.0
 
 description: >
   Fan-in: collect the thermodynamic series of a temperature sweep into one
@@ -23,6 +23,7 @@ parameters:
   equilibration_fraction:
     type: number
     default: 0.5
+    description: Fraction of each series discarded from the start; 0 <= f < 1.
 
 outputs:
   series:

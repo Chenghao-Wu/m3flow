@@ -124,6 +124,51 @@ pub struct Resources {
 }
 
 impl TaskSpec {
+    /// Fingerprint of everything in the spec that can change what a run
+    /// computes: interface types, parameter declarations (types, defaults,
+    /// units, enums), outputs, required validators and implementations.
+    /// Documentation (descriptions, tags) and scheduling hints (resources)
+    /// are excluded.
+    pub fn execution_fingerprint(&self) -> String {
+        let params: BTreeMap<&String, serde_json::Value> = self
+            .parameters
+            .iter()
+            .map(|(k, p)| {
+                (
+                    k,
+                    serde_json::json!({
+                        "type": p.param_type, "required": p.required,
+                        "default": p.default, "unit": p.unit, "values": p.values,
+                    }),
+                )
+            })
+            .collect();
+        let inputs: BTreeMap<&String, serde_json::Value> = self
+            .inputs
+            .iter()
+            .map(|(k, i)| {
+                (
+                    k,
+                    serde_json::json!({"type": i.artifact_type, "required": i.required, "many": i.many}),
+                )
+            })
+            .collect();
+        let outputs: BTreeMap<&String, &String> = self
+            .outputs
+            .iter()
+            .map(|(k, o)| (k, &o.artifact_type))
+            .collect();
+        crate::canon::hash_json(&serde_json::json!({
+            "name": self.name,
+            "version": self.version,
+            "inputs": inputs,
+            "parameters": params,
+            "outputs": outputs,
+            "validation": self.validation,
+            "implementations": self.implementations,
+        }))
+    }
+
     pub fn from_json(v: &serde_json::Value) -> Result<Self> {
         serde_json::from_value(v.clone())
             .map_err(|e| M3FlowError::schema(format!("task spec decode failed: {e}")))
