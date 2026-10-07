@@ -1,7 +1,7 @@
 schema: task/v1
 
 name: fit_tg
-version: 1.0.0
+version: 1.0.1
 
 description: >
   Glass transition temperature from a bilinear fit of the specific volume

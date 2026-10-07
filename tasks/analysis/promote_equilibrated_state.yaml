@@ -1,13 +1,16 @@
 schema: task/v1
 
 name: promote_equilibrated_state
-version: 1.0.0
+version: 1.1.0
 
 description: >
   Promote a SimulationState to an EquilibratedState, gated on a passing
   EquilibrationReport. This is the only way EquilibratedState artifacts come
   into existence: running an equilibration protocol alone never suffices
-  without scientific validation (plan §20).
+  without scientific validation (plan §20). The report must have passed
+  every check and be bound to this state (its subject fingerprint, or thermo
+  evidence produced by the task run that produced the state); the runtime
+  re-verifies the binding and that the state's files are carried unchanged.
 
 category: validation
 
@@ -28,7 +31,10 @@ parameters:
   require_pass:
     type: boolean
     default: true
-    description: Fail with a scientific validation error when the report is negative.
+    description: >
+      Must be true (kept for compatibility). Forced promotion was removed:
+      continuing without certification means using the SimulationState
+      directly.
 
 outputs:
   state:

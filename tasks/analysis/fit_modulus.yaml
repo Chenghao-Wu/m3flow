@@ -1,7 +1,7 @@
 schema: task/v1
 
 name: fit_modulus
-version: 1.0.0
+version: 1.1.0
 
 description: >
   Young's modulus from the initial linear region of a stress-strain series.

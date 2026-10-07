@@ -1,7 +1,7 @@
 schema: task/v1
 
 name: energy_minimize
-version: 1.0.0
+version: 1.1.0
 
 description: >
   Minimize the potential energy of a system or an existing simulation state.

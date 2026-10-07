@@ -59,6 +59,9 @@ pub struct Registry {
     types: TypeSet,
     /// gates project-sourced documents (builtins are exempt)
     policy: LoadPolicy,
+    /// same `name@version` redefined by a later source:
+    /// (kind:qualified name, replaced origin, replacing origin)
+    overrides: Vec<(String, String, String)>,
 }
 
 impl Registry {
@@ -203,10 +206,25 @@ impl Registry {
         }
     }
 
+    fn note_override(&mut self, key: String, origin: &str) {
+        if let Some(prev) = self.origins.insert(key.clone(), origin.to_string()) {
+            if prev != origin {
+                self.overrides.push((key, prev, origin.to_string()));
+            }
+        }
+    }
+
+    /// Specs whose `name@version` was redefined by a later source (e.g. a
+    /// project file shadowing a builtin). Versions are meant to be
+    /// immutable; development projects may override, but callers should
+    /// say so loudly.
+    pub fn overrides(&self) -> &[(String, String, String)] {
+        &self.overrides
+    }
+
     fn register_task(&mut self, spec: TaskSpec, origin: &str) {
         let version = Version::parse(&spec.version).unwrap_or_else(|_| Version::new(0, 0, 0));
-        self.origins
-            .insert(format!("task:{}", spec.qualified()), origin.to_string());
+        self.note_override(format!("task:{}", spec.qualified()), origin);
         self.tasks
             .entry(spec.name.clone())
             .or_default()
@@ -215,8 +233,7 @@ impl Registry {
 
     fn register_workflow(&mut self, spec: WorkflowSpec, origin: &str) {
         let version = Version::parse(&spec.version).unwrap_or_else(|_| Version::new(0, 0, 0));
-        self.origins
-            .insert(format!("workflow:{}", spec.qualified()), origin.to_string());
+        self.note_override(format!("workflow:{}", spec.qualified()), origin);
         self.workflows
             .entry(spec.name.clone())
             .or_default()

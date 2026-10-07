@@ -1,7 +1,7 @@
 schema: task/v1
 
 name: compute_rdf
-version: 1.0.0
+version: 1.1.0
 
 description: >
   Radial distribution function g(r) from a trajectory. Optionally restricted

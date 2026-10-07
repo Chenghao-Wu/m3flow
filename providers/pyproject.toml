@@ -10,6 +10,13 @@ license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = ["PyYAML", "numpy"]
 
+[project.optional-dependencies]
+# trajectory analysis tasks (compute_rdf/rg/ree/msd, equilibration Rg check)
+analysis = ["MDAnalysis>=2.1", "freud-analysis>=2.13"]
+# extxyz trajectories (compute_species_msd)
+extxyz = ["ase"]
+test = ["pytest"]
+
 [project.scripts]
 m3flow-autopoly = "m3flow_autopoly.main:cli"
 m3flow-lammps = "m3flow_lammps.main:cli"

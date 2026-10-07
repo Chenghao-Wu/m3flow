@@ -70,10 +70,42 @@ impl<'r> Compiler<'r> {
             "spec": serde_json::to_value(spec).unwrap_or_default(),
             "params": params,
         }));
+        let mut task_fps = BTreeMap::new();
+        for n in &nodes {
+            if !task_fps.contains_key(&n.task) {
+                let fp = self.registry.task(&n.task)?.execution_fingerprint();
+                task_fps.insert(n.task.clone(), fp);
+            }
+        }
+        // `retry`, `resources` are part of the node IR; resources only steer
+        // scheduling but a changed retry policy changes run outcomes.
+        let closure_nodes: Vec<serde_json::Value> = nodes
+            .iter()
+            .map(|n| {
+                let mut v = serde_json::to_value(n).unwrap_or_default();
+                if let Some(o) = v.as_object_mut() {
+                    o.remove("label");
+                    o.remove("resources");
+                }
+                v
+            })
+            .collect();
+        let closure_hash = canon::hash_json(&serde_json::json!({
+            "closure": "m3flow-closure/1",
+            "name": spec.name,
+            "version": spec.version,
+            "params": params,
+            "inputs": spec.inputs.iter().map(|(k, d)| (k.clone(), d.artifact_type.clone()))
+                .collect::<BTreeMap<_, _>>(),
+            "nodes": closure_nodes,
+            "outputs": serde_json::to_value(&outputs).unwrap_or_default(),
+            "tasks": task_fps,
+        }));
         Ok(CompiledWorkflow {
             name: spec.name.clone(),
             version: spec.version.clone(),
             spec_hash,
+            closure_hash,
             nodes,
             outputs,
             inputs_decl: spec.inputs.clone(),

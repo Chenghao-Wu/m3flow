@@ -1,11 +1,14 @@
 schema: task/v1
 
 name: compute_adhesion
-version: 1.0.0
+version: 1.1.0
 
 description: >
-  Interface adhesion estimate from the polymer/substrate interaction energy:
-  work of adhesion W = -E_int / A (kcal/mol/angstrom2 converted to mJ/m2).
+  Interfacial interaction-energy density -<E_int> / (n_interfaces * A) from
+  the group/group interaction energy recorded by the MD run (mJ/m2, or
+  reduced units for lj). This is NOT the reversible work of adhesion (no
+  entropy, surface reconstruction or separation path); the result states
+  whether long-range (kspace) terms are included.
 
 category: analysis
 
@@ -22,11 +25,23 @@ inputs:
 parameters:
   interface_area:
     type: area
-    required: true
-    description: Cross-sectional area of the interface.
+    description: >
+      Area of one interface. Default: mean lateral box area (perpendicular
+      to interface_normal) over the averaged samples.
+  interface_normal:
+    type: enum
+    values: [x, y, z]
+    default: z
+  n_interfaces:
+    type: integer
+    default: 1
+    description: >
+      Number of polymer/substrate interfaces in the cell (2 for a periodic
+      film-on-slab without vacuum).
   equilibration_fraction:
     type: number
     default: 0.5
+    description: Fraction of the series discarded from the start; 0 <= f < 1.
 
 outputs:
   result:

@@ -1,7 +1,7 @@
 schema: task/v1
 
 name: fit_diffusion
-version: 1.0.0
+version: 1.1.0
 
 description: >
   Self-diffusion coefficient from the Einstein relation: linear fit of the
@@ -28,6 +28,15 @@ parameters:
     type: number
     default: 0.8
     description: End of the linear fit window (fraction of max lag).
+  sigma:
+    type: length
+    description: >
+      Physical length of the reduced unit sigma; with tau, maps a reduced
+      (lj) diffusion coefficient to cm2/s. Without both, lj results stay in
+      sigma2/tau.
+  tau:
+    type: time
+    description: Physical duration of the reduced time unit tau.
 
 outputs:
   result:

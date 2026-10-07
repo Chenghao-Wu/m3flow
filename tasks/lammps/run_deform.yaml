@@ -1,11 +1,13 @@
 schema: task/v1
 
 name: run_deform
-version: 1.0.0
+version: 1.1.0
 
 description: >
-  Uniaxial tensile deformation in an NVT ensemble (fix deform erate).
-  Produces a stress-strain series for mechanical property estimation.
+  Uniaxial tensile deformation in an NVT ensemble (fix deform erate, atoms
+  remapped with the box). Strain is measured from the box, (L - L0)/L0.
+  Produces a stress-strain series in GPa (real units) or reduced units (lj)
+  for mechanical property estimation.
 
 category: sampling
 
@@ -39,6 +41,9 @@ parameters:
   timestep:
     type: time
     default: 1 fs
+  tdamp:
+    type: time
+    default: 100 fs
   sampling_interval:
     type: time
     default: 0.5 ps

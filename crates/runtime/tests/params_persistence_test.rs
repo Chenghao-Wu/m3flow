@@ -69,7 +69,7 @@ case "$1" in
     echo '{"protocol":"m3flow-provider/1","provider":{"name":"fake","version":"0.1.0"},"engine":{"name":"fake","version":"0.1"},"tasks":[]}'
     ;;
   execute)
-    wd=$(grep -oP '"workdir":\s*"\K[^"]+' "$2")
+    wd=$(sed -n 's/.*"workdir": *"\([^"]*\)".*/\1/p' "$2" | head -1)
     echo "fake result" > "$wd/result.txt"
     echo '{"status":"success","outputs":{"result":{"type":"Result","files":{"summary":"result.txt"},"metadata":{},"data":{"value":42}}},"validation":[],"engine":{"name":"fake","version":"0.1"},"warnings":[]}'
     ;;

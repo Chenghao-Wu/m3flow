@@ -1,13 +1,19 @@
 schema: task/v1
 
 name: check_polymer_equilibration
-version: 1.0.0
+version: 1.1.0
 
 description: >
-  Scientific validation of an equilibration protocol: density drift, energy
-  and volume stationarity over the tail of the series, plus Rg/Ree stability
-  when a trajectory is supplied. Produces the EquilibrationReport that gates
-  EquilibratedState promotion.
+  Stationarity gate for one sampling window: density drift and mean shift,
+  linear-trend significance and mean shift of the energy and volume (blocked
+  standard errors), plus Rg stability when a trajectory is supplied. Every
+  check is passed / failed / insufficient_data / error, and the report is
+  equilibrated only when all checks passed — missing evidence never counts.
+  The EquilibrationReport records the evidence it examined (artifact ids,
+  content hashes, producing task run) and, when given, the state it
+  certifies; promotion verifies that binding. Passing certifies
+  thermodynamic stationarity of these observables only — not
+  conformational, entanglement or long-time dynamical equilibration.
 
 category: validation
 
@@ -26,6 +32,10 @@ inputs:
   log:
     type: SimulationLog
     required: false
+  state:
+    type: SimulationState
+    required: false
+    description: The state the report certifies (recorded as its subject).
 
 parameters:
   density_drift_threshold:
@@ -39,6 +49,17 @@ parameters:
   tail_fraction:
     type: number
     default: 0.5
+    description: Fraction of the series KEPT at the end for the checks; 0 < f <= 1.
+  observables:
+    type: string_list
+    default: [energy, volume]
+    description: Extra observables tested for trend + mean shift (energy, potential_energy, volume).
+  polymer_selection:
+    type: string
+    description: >
+      MDAnalysis selection of the polymer atoms (default: all). Every
+      bond-connected fragment of the selection is one chain, so mixtures,
+      solvent and substrates must be excluded here.
 
 outputs:
   report:

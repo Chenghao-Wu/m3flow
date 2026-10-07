@@ -68,7 +68,7 @@ impl Dimension {
                 ("bar", 1.0),
                 ("atm", 1.01325),
                 ("Pa", 1.0e-5),
-                ("kPa", 1.0e-4),
+                ("kPa", 1.0e-2),
                 ("MPa", 10.0),
                 ("GPa", 10000.0),
                 ("psi", 0.0689476),
@@ -210,6 +210,74 @@ mod tests {
     fn rejects_bare_numbers_and_bad_units() {
         assert!(Quantity::parse_json(Dimension::Temperature, &serde_json::json!(300)).is_err());
         assert!(Quantity::parse_str(Dimension::Pressure, "1 furlong").is_err());
+    }
+
+    /// Known physical values, one per accepted symbol. A round-trip test
+    /// cannot catch a wrong factor (both directions would share it), so
+    /// every entry is pinned to an independently known equivalence.
+    #[test]
+    fn every_unit_factor_matches_a_known_value() {
+        let cases: &[(Dimension, &str, f64)] = &[
+            (Dimension::Temperature, "300 K", 300.0),
+            (Dimension::Pressure, "1 bar", 1.0),
+            (Dimension::Pressure, "1 atm", 1.01325),
+            (Dimension::Pressure, "100000 Pa", 1.0),
+            (Dimension::Pressure, "100 kPa", 1.0),
+            (Dimension::Pressure, "0.1 MPa", 1.0),
+            (Dimension::Pressure, "1 GPa", 10000.0),
+            (Dimension::Pressure, "14.5037738 psi", 1.0),
+            (Dimension::Time, "1 fs", 1.0),
+            (Dimension::Time, "1 ps", 1.0e3),
+            (Dimension::Time, "1 ns", 1.0e6),
+            (Dimension::Time, "1 us", 1.0e9),
+            (Dimension::Time, "1 s", 1.0e15),
+            (Dimension::Time, "1 min", 60.0e15),
+            (Dimension::Time, "1 h", 3600.0e15),
+            (Dimension::Length, "1 angstrom", 1.0),
+            (Dimension::Length, "1 A", 1.0),
+            (Dimension::Length, "1 nm", 10.0),
+            (Dimension::Density, "1 g/cm3", 1.0),
+            (Dimension::Density, "1000 kg/m3", 1.0),
+            (Dimension::Density, "1 g/ml", 1.0),
+            (Dimension::Energy, "1 kcal/mol", 1.0),
+            (Dimension::Energy, "4.184 kJ/mol", 1.0),
+            (Dimension::Energy, "1 eV", 23.0605),
+            (Dimension::Energy, "4.184 kJ", 1.0),
+            (Dimension::Energy, "1 kcal", 1.0),
+            (Dimension::Area, "1 angstrom2", 1.0),
+            (Dimension::Area, "1 A2", 1.0),
+            (Dimension::Area, "1 nm2", 100.0),
+            (Dimension::Area, "1 m2", 1.0e20),
+        ];
+        for (dim, text, want) in cases {
+            let q = Quantity::parse_str(*dim, text).unwrap();
+            assert!(
+                ((q.value - want) / want).abs() < 1e-5,
+                "{text} -> {} {} (expected {want})",
+                q.value,
+                q.unit
+            );
+        }
+        // every accepted symbol is covered above
+        for dim in [
+            Dimension::Temperature,
+            Dimension::Pressure,
+            Dimension::Time,
+            Dimension::Length,
+            Dimension::Density,
+            Dimension::Energy,
+            Dimension::Area,
+        ] {
+            for (sym, _) in dim.units() {
+                assert!(
+                    cases
+                        .iter()
+                        .any(|(d, t, _)| d == &dim && t.split_once(' ').unwrap().1 == *sym),
+                    "unit '{sym}' of {} has no known-value test",
+                    dim.as_str()
+                );
+            }
+        }
     }
 
     #[test]

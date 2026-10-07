@@ -20,15 +20,25 @@ Exit code: `0` for a well-formed response (including scientific failures), non-z
 
 ## describe
 
+`describe [CONFIG.json]` — the optional file holds the engine config the
+runtime will forward to `execute`; the engine probe must describe the
+engine that config selects.
+
 ```json
 {
   "protocol": "m3flow-provider/1",
-  "provider": {"name": "lammps", "version": "1.0.0"},
-  "engine": {"name": "LAMMPS", "version": "stable_22Jul2025_update3", "path": "/home/zhenghaowu/lammps/build/lmp"},
-  "tasks": [{"name": "run_npt", "version": "1.0.0"}, {"name": "energy_minimize", "version": "1.0.0"}],
-  "validators": ["simulation_completed", "no_nan", "no_lost_atoms", "trajectory_readable"]
+  "provider": {"name": "lammps", "version": "0.4.0"},
+  "engine": {"name": "lammps", "version": "22 Jul 2025 - Update 3",
+             "executable": "/opt/lammps/bin/lmp", "packages": ["KSPACE", "MOLECULE"]},
+  "scheduling_config_keys": ["launcher", "mpi", "np"],
+  "tasks": ["energy_minimize", "run_npt"]
 }
 ```
+
+The whole `engine` object joins the cache key; `scheduling_config_keys`
+names engine-config keys that only change parallelization and are left
+out of it. Report `{"name": "unknown", ...}` when the engine cannot be
+identified — the runtime then never caches the provider's results.
 
 ## validate
 

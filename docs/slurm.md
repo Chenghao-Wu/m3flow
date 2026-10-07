@@ -75,14 +75,17 @@ sacctmgr show assoc user=$USER     # accounts and QoS you may use
 
 ## What a run looks like
 
-Per task, the workdir (`.m3flow/runs/<run>/<step>/`) gains:
+Every dispatch runs in its own attempt directory,
+`.m3flow/runs/<run>/<step>/attempt-NNN/`, which gains:
 
 - `submit.sh` — the generated batch script (inspect it when debugging),
 - `slurm_job_id` — the submitted job id,
 - `slurm-<jobid>.out` — Slurm's own output (setup command errors land here),
 - `provider_stdout.json` / `provider_stderr.log` — the provider's protocol
   doc and log,
-- `.m3flow_exit` — the provider exit code (primary completion signal),
+- `.m3flow_exit` — `<exit code> <job id>`, the primary completion signal;
+  it is only trusted when it names the job being waited on (outcome files
+  of an earlier attempt can never answer for a new submission),
 - `request.json` / `response.json` — as with local execution.
 
 `--max-concurrency` caps in-flight Slurm jobs (respect your QoS `MaxJobs`).

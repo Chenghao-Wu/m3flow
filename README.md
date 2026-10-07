@@ -137,7 +137,7 @@ Reduced-scale end-to-end validations, all reproducible:
 | `ethanol_diffusion` | SMILES → equilibrated → NVE → MSD → D |
 | `peo_density` | Larsen 21-step → 1.069 g/cm³ (lit. ~1.1) |
 | `polymer_multi` | property fan-out; 3rd run 35/35 CACHED in ~4 s |
-| `peo_silica_adhesion` | quartz slab + film → W = 101 mJ/m² |
+| `peo_silica_adhesion` | quartz slab + film → interaction-energy density 101 mJ/m² (measured before the kspace fix: pair terms only) |
 | `cg_melt` | bead-spring CG construct → push-off → NVT |
 
 Reduced scale demonstrates the platform, not converged physics: ps-scale
@@ -147,12 +147,19 @@ tails carry real statistical drift, and the equilibration gate says so.
 
 - Bare numbers are rejected for quantity parameters — `{value, unit}` or
   `"300 K"` strings, canonicalized (K, bar, fs, Å, g/cm³, kcal/mol, Å²).
-- Artifact identity = type + schema version + per-file content hashes.
-  Metadata is descriptive, never identity.
-- Cache key = task@version + provider@version + engine version + input
-  content hashes + canonical params.
-- `EquilibratedState` only via `promote_equilibrated_state` gated on a
-  passing `EquilibrationReport`.
+- Artifact identity (`content_hash`) = type + schema version + per-file
+  content hashes. What a task computes from an artifact is its *execution
+  fingerprint*: content hash + data payload + semantic metadata (time axes,
+  units, strides; only presentation keys such as `label`/`notes` excluded).
+- Cache key (`m3flow-cache/2`) = task@version + TaskSpec fingerprint +
+  provider@version + full engine descriptor + effective engine config +
+  input execution fingerprints + canonical params. A provider that cannot
+  identify its engine is never cached.
+- `EquilibratedState` only via `promote_equilibrated_state`, from a report
+  that passed every check and is bound to that very state; the runtime
+  re-verifies the binding and refuses hand registration of certified types.
+- A resume executes the definition the run started with: a changed
+  execution closure (graph, params, task definitions) is refused.
 - Providers are separate processes speaking `m3flow-provider/1` (single JSON
   document on stdout); the runtime owns ingestion into the CAS.
 

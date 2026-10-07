@@ -70,6 +70,12 @@ pub struct CompiledWorkflow {
     pub version: String,
     /// Fingerprint of spec + resolved parameters (plan §54).
     pub spec_hash: String,
+    /// Fingerprint of the full execution closure: the expanded node graph
+    /// (tasks, bindings, parameters, conditions, retry), workflow outputs
+    /// and the execution-relevant part of every referenced TaskSpec.
+    /// Subworkflow content is covered through the expanded nodes. A resume
+    /// refuses to continue a run whose closure changed.
+    pub closure_hash: String,
     /// Topologically sorted (dependencies first).
     pub nodes: Vec<IrNode>,
     pub outputs: BTreeMap<String, OutputBinding>,

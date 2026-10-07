@@ -1,7 +1,7 @@
 schema: task/v1
 
 name: prepare_simulation_system
-version: 1.0.0
+version: 1.0.1
 
 description: >
   Pack a ParameterizedSystem into a simulation box and emit a runnable

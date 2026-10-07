@@ -120,9 +120,29 @@ impl ProviderHandle {
         Ok(parsed)
     }
 
+    /// `describe`, cached per handle. The engine config is handed to the
+    /// provider so its engine probe describes the engine `execute` would
+    /// actually launch (not, e.g., whatever binary is first on PATH).
     pub fn describe(&mut self) -> Result<&serde_json::Value> {
         if self.description.is_none() {
-            let v = self.run_json("describe", None)?;
+            let config_file = match &self.config.engine {
+                Some(cfg) => {
+                    let path = std::env::temp_dir().join(format!(
+                        "m3flow-describe-{}-{}.json",
+                        std::process::id(),
+                        m3flow_core::id::TaskRunId::new().as_str()
+                    ));
+                    std::fs::write(&path, cfg.to_string())
+                        .map_err(|e| M3FlowError::io(e, "writing describe config"))?;
+                    Some(path)
+                }
+                None => None,
+            };
+            let v = self.run_json("describe", config_file.as_deref());
+            if let Some(p) = &config_file {
+                let _ = std::fs::remove_file(p);
+            }
+            let v = v?;
             let proto = v
                 .get("protocol")
                 .and_then(|p| p.as_str())
@@ -142,6 +162,7 @@ impl ProviderHandle {
         Ok(self.description.as_ref().unwrap())
     }
 
+    /// Short `name/version` label of the engine (display only).
     pub fn engine_version(&mut self) -> Result<String> {
         let d = self.describe()?;
         let engine = d.get("engine").cloned().unwrap_or(serde_json::json!({}));
@@ -154,6 +175,47 @@ impl ProviderHandle {
             .and_then(|x| x.as_str())
             .unwrap_or("unknown");
         Ok(format!("{name}/{version}"))
+    }
+
+    /// Cache-key identity of the engine: a hash of the *whole* descriptor
+    /// (version, executable, compiled packages, library versions, ...).
+    /// `None` when the provider could not identify its engine — such
+    /// results must not be shared through the cache across environments.
+    pub fn engine_fingerprint(&mut self) -> Option<String> {
+        let d = self.describe().ok()?;
+        let engine = d.get("engine")?;
+        let field = |k: &str| engine.get(k).and_then(|x| x.as_str()).unwrap_or("unknown");
+        let (name, version) = (field("name"), field("version"));
+        if name == "unknown"
+            || version.is_empty()
+            || version.contains("unknown")
+            || version.starts_with("unavailable")
+        {
+            return None;
+        }
+        Some(m3flow_core::canon::hash_json(engine))
+    }
+
+    /// Hash of the engine config forwarded to `execute`, minus the keys the
+    /// provider declares scheduling-only (they change parallelization, not
+    /// results).
+    pub fn config_fingerprint(&mut self) -> String {
+        let exclude: Vec<String> = self
+            .describe()
+            .ok()
+            .and_then(|d| d.get("scheduling_config_keys").cloned())
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let effective = match self.config.engine.clone() {
+            Some(serde_json::Value::Object(m)) => serde_json::Value::Object(
+                m.into_iter()
+                    .filter(|(k, _)| !exclude.contains(k))
+                    .collect(),
+            ),
+            Some(other) => other,
+            None => serde_json::json!({}),
+        };
+        m3flow_core::canon::hash_json(&effective)
     }
 
     pub fn execute(&self, request_path: &Path, workdir: &Path) -> Result<ExecuteResponse> {

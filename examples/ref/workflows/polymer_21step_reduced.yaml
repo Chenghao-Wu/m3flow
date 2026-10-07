@@ -4,7 +4,7 @@ name: polymer_21step_reduced
 version: 0.1.0
 
 description: >
-  REDUCED-SCALE TEST VARIANT of polymer_21step_equilibration@1.0.0 (Larsen
+  REDUCED-SCALE TEST VARIANT of polymer_21step_equilibration@1.1.0 (Larsen
   schedule, ps-range durations) — for platform validation only, never for
   production properties. Same 21-stage compression/decompression structure;
   ~40x shorter stages. Plan §18: protocol changes get a new version, never a
@@ -56,6 +56,7 @@ steps:
     inputs:
       thermo: "${s21_npt.thermo}"
       trajectory: "${s21_npt.trajectory}"
+      state: "${s21_npt.state}"
     parameters:
       # reduced-scale tolerance: ps-scale tails have genuine statistical drift
       density_drift_threshold: 0.05

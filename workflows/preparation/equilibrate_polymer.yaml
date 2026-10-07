@@ -1,7 +1,7 @@
 schema: workflow/v1
 
 name: equilibrate_polymer
-version: 1.0.0
+version: 1.1.0
 
 description: >
   Adaptive equilibration (plan §21): run the base protocol, check, and only
@@ -18,7 +18,7 @@ applicability:
   resolution: atomistic
   systems: [polymer_melt]
 references:
-  - Extends polymer_21step_equilibration@1.0.0 with an adaptive extension.
+  - Extends polymer_21step_equilibration@1.1.0 with an adaptive extension.
 assumptions:
   - One extension block is enough for moderately entangled melts; increase
     extension_duration or re-run otherwise.
@@ -40,7 +40,7 @@ parameters:
   density_drift_threshold: {type: number, default: 0.01,
                             description: "Gate — max relative density drift over the tail."}
   stationarity_sigma: {type: number, default: 3.0,
-                       description: "Gate — max tail-mean shift, in tail standard deviations."}
+                       description: "Gate — max mean shift / linear trend, in blocked standard errors."}
   tail_fraction: {type: number, default: 0.5,
                   description: "Gate — fraction of the series treated as the tail."}
 
@@ -68,6 +68,7 @@ steps:
     inputs:
       thermo: "${s06_npt.thermo}"
       trajectory: "${s06_npt.trajectory}"
+      state: "${s06_npt.state}"
     parameters:
       density_drift_threshold: "${params.density_drift_threshold}"
       stationarity_sigma: "${params.stationarity_sigma}"
@@ -97,6 +98,7 @@ steps:
     inputs:
       thermo: "${extend_npt.thermo}"
       trajectory: "${extend_npt.trajectory}"
+      state: "${extend_npt.state}"
     parameters:
       density_drift_threshold: "${params.density_drift_threshold}"
       stationarity_sigma: "${params.stationarity_sigma}"

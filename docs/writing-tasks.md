@@ -35,7 +35,8 @@ Rules of thumb:
   check; the runtime fails the task when a declared validator is missing or
   failing.
 - If a task's logic changes meaningfully, bump `version`. Cache keys include
-  `name@version` and the provider version — correctness depends on it.
+  `name@version`, the TaskSpec's execution fingerprint and the provider
+  version — correctness depends on it.
 
 ## 2. The provider
 
@@ -77,8 +78,13 @@ Contract points:
 - Errors: raise `ProviderFailure(error_type, category, message,
   recoverable=..., details=..., raw_log=...)`; unexpected exceptions become
   `engine_crash/provider_error`. Categories drive the scheduler's retry.
-- `describe` must report the engine version accurately — it joins the cache
-  key. Bump the provider's own version when task logic changes.
+- `describe [CONFIG.json]` must describe the engine that `execute` would
+  use under that engine config (resolved executable, version, build
+  options); the whole descriptor joins the cache key. Declare config keys
+  that only affect parallelization in `scheduling_config_keys`. Bump the
+  provider's own version when task logic changes.
+- Never emit NaN/Infinity: report statistics that cannot be estimated as
+  `null` plus a status (`m3flow_provider.dumps` enforces strict JSON).
 - Input artifacts' `files` are absolute CAS paths (extensionless). Stage
   copies with proper filenames if your parser sniffs extensions (see
   `_universe` in the analysis provider).

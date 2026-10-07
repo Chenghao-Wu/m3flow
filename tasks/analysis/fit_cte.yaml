@@ -1,7 +1,7 @@
 schema: task/v1
 
 name: fit_cte
-version: 1.0.0
+version: 1.0.1
 
 description: >
   Volumetric thermal expansion coefficient alpha = (1/V)(dV/dT) from a linear
